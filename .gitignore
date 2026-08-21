@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Virtual environment
+.venv/
+
+# VS Code
+.vscode/
+
+# Environment variables
+.env
+
+# Personal/generated data
+data/raw/
+data/processed/
+
+# Databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
