@@ -71,3 +71,31 @@ FINAL_COLUMNS = [
     "anomaly_score",
     "is_anomaly"
 ]
+# --------------------------------------------------
+# Session Configuration
+# --------------------------------------------------
+
+# If the user is inactive for this long,
+# the next activity starts a new workspace session.
+SESSION_IDLE_BREAK_SECONDS = 300  # 5 minutes
+
+# Very large timestamp gaps also create a new session.
+SESSION_GAP_SECONDS = 300
+
+
+# --------------------------------------------------
+# ML Configuration
+# --------------------------------------------------
+
+DEFAULT_CLUSTER_COUNT = 4
+
+RANDOM_STATE = 42
+
+ANOMALY_CONTAMINATION = 0.05
+
+
+# --------------------------------------------------
+# Near Real-Time Processing
+# --------------------------------------------------
+
+PIPELINE_REFRESH_SECONDS = 15

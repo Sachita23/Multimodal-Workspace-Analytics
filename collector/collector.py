@@ -1,125 +1,205 @@
+import sys
 import time
 import csv
+import os
 import ctypes
+
+from pathlib import Path
 from datetime import datetime
 
+# ============================================================
+# PROJECT PATH
+# ============================================================
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+
+# ============================================================
+# THIRD-PARTY LIBRARIES
+# ============================================================
+
 import psutil
+import pygetwindow as gw
 import win32gui
 import win32process
 
+
+# ============================================================
+# PROJECT CONFIGURATION
+# ============================================================
+
 from config import (
     RAW_DATA_FILE,
-    COLLECTION_INTERVAL,
-    IDLE_THRESHOLD_SECONDS
+    COLLECTION_INTERVAL
 )
 
 
-# --------------------------------------------------
-# Application Detection
-# --------------------------------------------------
+# ============================================================
+# COLLECTOR SETTINGS
+# ============================================================
+
+# User is considered idle after this many seconds
+IDLE_THRESHOLD_SECONDS = 60
+
+
+# ============================================================
+# WINDOWS API STRUCTURES
+# ============================================================
+
+class LASTINPUTINFO(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", ctypes.c_uint),
+        ("dwTime", ctypes.c_uint)
+    ]
+
+
+# ============================================================
+# ACTIVE APPLICATION
+# ============================================================
 
 def get_active_application():
     """
+    Get the currently active application and window title.
+
     Returns:
-        application process name
-        active window title
+        application_name, window_title
     """
 
     try:
         hwnd = win32gui.GetForegroundWindow()
 
-        if hwnd == 0:
+        if not hwnd:
             return "Unknown", "Unknown"
 
         window_title = win32gui.GetWindowText(hwnd)
 
-        _, process_id = (
-            win32process.GetWindowThreadProcessId(hwnd)
+        try:
+            _, process_id = win32process.GetWindowThreadProcessId(hwnd)
+
+            process = psutil.Process(process_id)
+
+            application_name = process.name()
+
+        except (
+            psutil.NoSuchProcess,
+            psutil.AccessDenied,
+            psutil.ZombieProcess
+        ):
+            application_name = "Unknown"
+
+        application_name = clean_application_name(
+            application_name
         )
 
-        process = psutil.Process(process_id)
+        if not window_title:
+            window_title = "Unknown"
 
-        return process.name(), window_title
+        return application_name, window_title
 
     except Exception:
         return "Unknown", "Unknown"
 
 
-# --------------------------------------------------
-# Application Name Cleaning
-# --------------------------------------------------
+# ============================================================
+# APPLICATION NAME CLEANING
+# ============================================================
 
-def clean_application_name(process_name):
+def clean_application_name(application_name):
     """
-    Converts Windows process names into readable
-    application names.
+    Convert executable names into readable application names.
     """
+
+    if not application_name:
+        return "Unknown"
+
+    name = application_name.lower()
 
     application_map = {
-
-        "Code.exe": "Visual Studio Code",
-
+        "code.exe": "Visual Studio Code",
         "chrome.exe": "Google Chrome",
-
         "msedge.exe": "Microsoft Edge",
-
+        "firefox.exe": "Mozilla Firefox",
         "explorer.exe": "File Explorer",
-
-        "WINWORD.EXE": "Microsoft Word",
-
-        "EXCEL.EXE": "Microsoft Excel",
-
-        "POWERPNT.EXE": "Microsoft PowerPoint",
-
+        "winword.exe": "Microsoft Word",
+        "excel.exe": "Microsoft Excel",
+        "powerpnt.exe": "Microsoft PowerPoint",
+        "outlook.exe": "Microsoft Outlook",
+        "teams.exe": "Microsoft Teams",
         "notepad.exe": "Notepad",
-
         "devenv.exe": "Visual Studio",
-
         "pycharm64.exe": "PyCharm",
-
         "idea64.exe": "IntelliJ IDEA",
-
-        "Teams.exe": "Microsoft Teams",
-
-        "OUTLOOK.EXE": "Microsoft Outlook",
+        "spotify.exe": "Spotify",
+        "discord.exe": "Discord",
+        "slack.exe": "Slack",
+        "whatsapp.exe": "WhatsApp",
+        "telegram.exe": "Telegram",
+        "zoom.exe": "Zoom",
+        "obs64.exe": "OBS Studio",
+        "taskmgr.exe": "Task Manager",
+        "powershell.exe": "PowerShell",
+        "windowsterminal.exe": "Windows Terminal",
+        "cmd.exe": "Command Prompt",
     }
 
-    return application_map.get(
-        process_name,
-        process_name
-    )
+    if name in application_map:
+        return application_map[name]
+
+    # Remove .exe from unknown applications
+    if name.endswith(".exe"):
+        name = name[:-4]
+
+    return name.title()
 
 
-# --------------------------------------------------
-# System Metrics
-# --------------------------------------------------
+# ============================================================
+# SYSTEM METRICS
+# ============================================================
 
 def get_system_metrics():
     """
     Collect CPU, memory and battery information.
+
+    Returns:
+        cpu_percent,
+        memory_percent,
+        battery_percent,
+        charging
     """
 
-    cpu_percent = psutil.cpu_percent(
-        interval=1
-    )
+    try:
+        cpu_percent = psutil.cpu_percent(
+            interval=None
+        )
+    except Exception:
+        cpu_percent = 0.0
 
-    memory_percent = (
-        psutil.virtual_memory().percent
-    )
+    try:
+        memory_percent = psutil.virtual_memory().percent
+    except Exception:
+        memory_percent = 0.0
 
-    battery = psutil.sensors_battery()
+    try:
+        battery = psutil.sensors_battery()
 
-    if battery is not None:
+        if battery is None:
+            battery_percent = 100.0
+            charging = False
+        else:
+            battery_percent = float(
+                battery.percent
+            )
 
-        battery_percent = battery.percent
+            charging = bool(
+                battery.power_plugged
+            )
 
-        charging = battery.power_plugged
-
-    else:
-
-        battery_percent = None
-
-        charging = None
+    except Exception:
+        battery_percent = 0.0
+        charging = False
 
     return (
         cpu_percent,
@@ -129,81 +209,78 @@ def get_system_metrics():
     )
 
 
-# --------------------------------------------------
-# Idle Detection
-# --------------------------------------------------
+# ============================================================
+# IDLE TIME
+# ============================================================
 
 def get_idle_time():
     """
-    Returns the number of seconds since the
-    last keyboard or mouse interaction.
+    Get the number of seconds since the user's
+    last keyboard or mouse input.
+
+    Windows-specific implementation.
     """
 
-    class LASTINPUTINFO(ctypes.Structure):
+    try:
+        last_input_info = LASTINPUTINFO()
 
-        _fields_ = [
-            ("cbSize", ctypes.c_uint),
-            ("dwTime", ctypes.c_uint)
-        ]
+        last_input_info.cbSize = ctypes.sizeof(
+            LASTINPUTINFO
+        )
 
-    last_input = LASTINPUTINFO()
+        result = ctypes.windll.user32.GetLastInputInfo(
+            ctypes.byref(last_input_info)
+        )
 
-    last_input.cbSize = (
-        ctypes.sizeof(LASTINPUTINFO)
-    )
+        if result == 0:
+            return 0.0
 
-    ctypes.windll.user32.GetLastInputInfo(
-        ctypes.byref(last_input)
-    )
+        current_tick = ctypes.windll.kernel32.GetTickCount()
 
-    current_tick = (
-        ctypes.windll.kernel32.GetTickCount()
-    )
+        idle_time_ms = (
+            current_tick -
+            last_input_info.dwTime
+        )
 
-    idle_milliseconds = (
-        current_tick - last_input.dwTime
-    )
+        return max(
+            0.0,
+            idle_time_ms / 1000.0
+        )
 
-    return idle_milliseconds / 1000
+    except Exception:
+        return 0.0
 
 
-def get_activity_status():
+# ============================================================
+# ACTIVITY STATUS
+# ============================================================
+
+def get_activity_status(idle_seconds):
     """
-    Determines whether the user is Active or Idle.
+    Determine whether the user is Active or Idle.
     """
-
-    idle_seconds = get_idle_time()
 
     if idle_seconds >= IDLE_THRESHOLD_SECONDS:
+        return "Idle"
 
-        status = "Idle"
-
-    else:
-
-        status = "Active"
-
-    return status, idle_seconds
+    return "Active"
 
 
-# --------------------------------------------------
-# Collect One Record
-# --------------------------------------------------
+# ============================================================
+# COLLECT ONE OBSERVATION
+# ============================================================
 
 def collect_data():
     """
-    Collects one raw workspace activity record.
+    Collect one workspace observation.
     """
 
     timestamp = datetime.now().strftime(
         "%Y-%m-%d %H:%M:%S"
     )
 
-    process_name, window_title = (
+    application, window_title = (
         get_active_application()
-    )
-
-    application = clean_application_name(
-        process_name
     )
 
     (
@@ -213,92 +290,124 @@ def collect_data():
         charging
     ) = get_system_metrics()
 
-    activity_status, idle_seconds = (
-        get_activity_status()
+    idle_seconds = get_idle_time()
+
+    activity_status = get_activity_status(
+        idle_seconds
     )
 
-    return {
-
+    data = {
         "timestamp": timestamp,
-
         "application": application,
-
         "window_title": window_title,
-
         "activity_status": activity_status,
-
         "idle_seconds": round(
             idle_seconds,
             2
         ),
-
         "cpu_percent": round(
             cpu_percent,
             2
         ),
-
         "memory_percent": round(
             memory_percent,
             2
         ),
-
-        "battery_percent": battery_percent,
-
+        "battery_percent": round(
+            battery_percent,
+            2
+        ),
         "charging": charging
     }
 
+    return data
 
-# --------------------------------------------------
-# Save Record
-# --------------------------------------------------
+
+# ============================================================
+# SAVE DATA
+# ============================================================
 
 def save_data(data):
     """
-    Appends one record to the raw CSV file.
+    Append one observation to the raw CSV file.
     """
 
-    RAW_DATA_FILE.parent.mkdir(
+    raw_file = Path(RAW_DATA_FILE)
+
+    # Make sure the directory exists
+    raw_file.parent.mkdir(
         parents=True,
         exist_ok=True
     )
 
-    file_exists = RAW_DATA_FILE.exists()
+    file_exists = raw_file.exists()
 
-    with open(
-        RAW_DATA_FILE,
-        "a",
-        newline="",
-        encoding="utf-8"
-    ) as file:
+    fieldnames = [
+        "timestamp",
+        "application",
+        "window_title",
+        "activity_status",
+        "idle_seconds",
+        "cpu_percent",
+        "memory_percent",
+        "battery_percent",
+        "charging"
+    ]
 
-        writer = csv.DictWriter(
-            file,
-            fieldnames=data.keys()
+    try:
+        with open(
+            raw_file,
+            mode="a",
+            newline="",
+            encoding="utf-8"
+        ) as csv_file:
+
+            writer = csv.DictWriter(
+                csv_file,
+                fieldnames=fieldnames
+            )
+
+            if not file_exists:
+                writer.writeheader()
+
+            writer.writerow(data)
+
+    except Exception as error:
+        print(
+            f"Error saving data: {error}"
         )
 
-        if not file_exists:
 
-            writer.writeheader()
+# ============================================================
+# DISPLAY OBSERVATION
+# ============================================================
 
-        writer.writerow(data)
+def display_data(data):
+    """
+    Display the latest observation in the terminal.
+    """
+
+    print(
+        f"[{data['timestamp']}] "
+        f"App: {data['application']} | "
+        f"Status: {data['activity_status']} | "
+        f"Idle: {data['idle_seconds']:.1f}s | "
+        f"CPU: {data['cpu_percent']:.1f}% | "
+        f"Memory: {data['memory_percent']:.1f}% | "
+        f"Battery: {data['battery_percent']:.1f}% | "
+        f"Charging: {data['charging']}"
+    )
 
 
-# --------------------------------------------------
-# Main Collector
-# --------------------------------------------------
+# ============================================================
+# MAIN COLLECTOR
+# ============================================================
 
 def main():
 
     print("=" * 65)
-
-    print(
-        "MULTIMODAL WORKSPACE ANALYTICS"
-    )
-
-    print(
-        "Workspace Data Collector"
-    )
-
+    print("MULTIMODAL WORKSPACE ANALYTICS")
+    print("Workspace Data Collector")
     print("=" * 65)
 
     print(
@@ -316,9 +425,10 @@ def main():
         f"{RAW_DATA_FILE}"
     )
 
-    print(
-        "\nPress CTRL+C to stop.\n"
-    )
+    print()
+    print("Collector started.")
+    print("Press CTRL+C to stop.")
+    print("-" * 65)
 
     try:
 
@@ -328,14 +438,7 @@ def main():
 
             save_data(data)
 
-            print(
-                f"[{data['timestamp']}] "
-                f"{data['application']} | "
-                f"{data['window_title']} | "
-                f"{data['activity_status']} | "
-                f"CPU {data['cpu_percent']}% | "
-                f"RAM {data['memory_percent']}%"
-            )
+            display_data(data)
 
             time.sleep(
                 COLLECTION_INTERVAL
@@ -343,10 +446,15 @@ def main():
 
     except KeyboardInterrupt:
 
-        print(
-            "\n\nCollector stopped."
-        )
+        print()
+        print("-" * 65)
+        print("Collector stopped.")
+        print("=" * 65)
 
+
+# ============================================================
+# ENTRY POINT
+# ============================================================
 
 if __name__ == "__main__":
     main()

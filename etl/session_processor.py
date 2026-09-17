@@ -2,7 +2,9 @@ import pandas as pd
 
 from config import (
     RAW_DATA_FILE,
-    PROCESSED_DATA_FILE
+    PROCESSED_DATA_FILE,
+    SESSION_IDLE_BREAK_SECONDS,
+    SESSION_GAP_SECONDS
 )
 
 
@@ -249,23 +251,52 @@ def calculate_activity_duration(df):
 # --------------------------------------------------
 
 def create_sessions(df):
-
     """
-    Creates an observation session whenever
-    the active application changes.
+    Creates workspace-level sessions.
 
-    This is the initial session definition.
-    Later analytics can operate on these sessions.
+    A new session starts when:
+    1. The timestamp gap becomes unusually large, OR
+    2. The previous observation shows prolonged inactivity.
+
+    Application switching alone DOES NOT create
+    a new workspace session.
     """
 
-    switch = (
-        df["application_switch"]
-        .fillna(False)
-        .astype(int)
+    df = df.copy()
+
+    # Time between current and previous observation
+    gap_seconds = (
+        df["timestamp"]
+        .diff()
+        .dt.total_seconds()
+        .fillna(0)
     )
 
+    # Previous row's idle duration
+    previous_idle = (
+        df["idle_seconds"]
+        .shift(1)
+        .fillna(0)
+    )
+
+    new_session = (
+        (gap_seconds > SESSION_GAP_SECONDS)
+        |
+        (
+            previous_idle
+            >= SESSION_IDLE_BREAK_SECONDS
+        )
+    )
+
+    # Always treat first row as first session
+    if len(new_session) > 0:
+        new_session.iloc[0] = True
+
     df["session_id"] = (
-        switch.cumsum()
+        new_session
+        .astype(int)
+        .cumsum()
+        - 1
     )
 
     return df
@@ -292,22 +323,50 @@ def calculate_total_switches(df):
 
 def calculate_behavior_features(df):
     """
-    Calculates observation-level behavioral features
-    required by the analytics dashboard.
+    Creates session-context behavioral features.
+
+    The final values remain observation-level so
+    they match the dashboard dataset, but features
+    describe the workspace session containing
+    each observation.
     """
+
+    df = df.copy()
+
+    # --------------------------------------------------
+    # Session Total Duration
+    # --------------------------------------------------
+
+    session_total_duration = (
+        df.groupby("session_id")[
+            "duration_seconds"
+        ]
+        .transform("sum")
+    )
+
+    # --------------------------------------------------
+    # Session Idle Duration
+    # --------------------------------------------------
+
+    session_idle_duration = (
+        df.groupby("session_id")[
+            "idle_duration_seconds"
+        ]
+        .transform("sum")
+    )
 
     # --------------------------------------------------
     # Idle Ratio
     # --------------------------------------------------
 
-    total_time = (
-        df["active_duration_seconds"]
-        + df["idle_duration_seconds"]
+    safe_total_duration = (
+        session_total_duration
+        .replace(0, 1)
     )
 
     df["idle_ratio"] = (
-        df["idle_duration_seconds"]
-        / total_time.replace(0, 1)
+        session_idle_duration
+        / safe_total_duration
     )
 
     df["idle_ratio"] = (
@@ -317,67 +376,71 @@ def calculate_behavior_features(df):
     )
 
     # --------------------------------------------------
-    # Switching Frequency
+    # Number of Switches Per Session
     # --------------------------------------------------
 
-    # Number of application switches per minute.
-    elapsed_minutes = (
-        df["duration_seconds"]
-        .cumsum()
-        / 60
+    session_switches = (
+        df.groupby("session_id")[
+            "application_switch"
+        ]
+        .transform("sum")
+    )
+
+    # --------------------------------------------------
+    # Switch Frequency
+    # switches per minute
+    # --------------------------------------------------
+
+    session_minutes = (
+        session_total_duration / 60
+    )
+
+    session_minutes = (
+        session_minutes.replace(0, 1)
     )
 
     df["switch_frequency"] = (
-        df["application_switch"]
-        .astype(int)
-        .cumsum()
-        / elapsed_minutes.replace(0, 1)
+        session_switches
+        / session_minutes
+    ).round(4)
+
+    # --------------------------------------------------
+    # Unique Applications Within Session
+    # --------------------------------------------------
+
+    df["unique_app_count"] = (
+        df.groupby("session_id")[
+            "application"
+        ]
+        .transform("nunique")
     )
 
-    df["switch_frequency"] = (
-        df["switch_frequency"]
-        .replace([float("inf"), -float("inf")], 0)
-        .fillna(0)
-        .round(4)
-    )
-
     # --------------------------------------------------
-    # Unique Applications Seen So Far
-    # --------------------------------------------------
-
-    seen_apps = set()
-    unique_counts = []
-
-    for application in df["application"]:
-        seen_apps.add(application)
-        unique_counts.append(len(seen_apps))
-
-    df["unique_app_count"] = unique_counts
-
-    # --------------------------------------------------
-    # Average CPU Usage
+    # Session Average CPU
     # --------------------------------------------------
 
     df["avg_cpu"] = (
-        df["cpu_percent"]
-        .expanding()
-        .mean()
+        df.groupby("session_id")[
+            "cpu_percent"
+        ]
+        .transform("mean")
         .round(2)
     )
 
     # --------------------------------------------------
-    # Average Memory Usage
+    # Session Average Memory
     # --------------------------------------------------
 
     df["avg_memory"] = (
-        df["memory_percent"]
-        .expanding()
-        .mean()
+        df.groupby("session_id")[
+            "memory_percent"
+        ]
+        .transform("mean")
         .round(2)
     )
 
     # --------------------------------------------------
-    # Time Features
+    # Temporal Features
     # --------------------------------------------------
 
     df["hour"] = (
@@ -393,7 +456,6 @@ def calculate_behavior_features(df):
     )
 
     return df
-
 # --------------------------------------------------
 # Save
 # --------------------------------------------------
