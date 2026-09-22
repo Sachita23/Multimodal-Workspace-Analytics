@@ -1,28 +1,34 @@
-# Python
+# Python virtual environment
+.venv/
+venv/
+env/
+
+# Python cache
 __pycache__/
 *.py[cod]
+*.pyo
 
-# Virtual environment
-.venv/
-
-# VS Code
-.vscode/
-
-# Environment variables
+# Environment / secrets
 .env
+.env.*
 
-# Personal/generated data
-data/raw/
-data/processed/
+# Node / React
+node_modules/
+dist/
+build/
 
-# Databases
-*.db
-*.sqlite
-*.sqlite3
+# IDE
+.vscode/
+.idea/
 
-# Jupyter
-.ipynb_checkpoints/
-
-# OS
+# OS files
 .DS_Store
 Thumbs.db
+
+# Project-generated data
+data/raw/*.csv
+data/processed/*.csv
+data/focus/*.csv
+
+# Logs
+*.log
