@@ -1,0 +1,23 @@
+session_id,event_type,timestamp,goal,planned_duration_minutes,allowed_apps,completion_status,title
+ef576f2a-7b6e-44a0-9ed3-6f86063fd7ad,START,2026-09-18 10:14:50,Study,25,Visual Studio Code | Google Chrome | PowerShell | File Explorer,,
+ef576f2a-7b6e-44a0-9ed3-6f86063fd7ad,END,2026-09-18 10:15:11,Study,25,Visual Studio Code | Google Chrome | PowerShell | File Explorer,Stopped early,
+0281e048-066e-4c80-8d85-6416252582d4,START,2026-09-18 10:22:30,temppp,17,Visual Studio Code | Google Chrome | PowerShell,,
+0281e048-066e-4c80-8d85-6416252582d4,END,2026-09-18 10:22:56,temppp,17,Visual Studio Code | Google Chrome | PowerShell,Stopped early,
+e289acd2-db09-47d5-b7cb-b9b4a8d5d438,START,2026-09-18 10:35:01,coding,25,Visual Studio Code | Google Chrome | File Explorer | Discord,,
+e289acd2-db09-47d5-b7cb-b9b4a8d5d438,END,2026-09-18 10:35:38,coding,25,Visual Studio Code | Google Chrome | File Explorer | Discord,Application closed,
+e384bb82-4563-4a46-9e86-203cabb03c58,START,2026-09-18 11:12:01,study for placement exam,1,Visual Studio Code | Google Chrome | IntelliJ IDEA | frfvf,,coding
+e384bb82-4563-4a46-9e86-203cabb03c58,END,2026-09-18 11:13:01,study for placement exam,1,Visual Studio Code | Google Chrome | IntelliJ IDEA | frfvf,Completed,coding
+c7d3ff51-9640-4979-add6-48905e40bf96,START,2026-09-18 12:55:45,For tomorrows assessment,2,Visual Studio Code | Google Chrome,,study DSA
+c7d3ff51-9640-4979-add6-48905e40bf96,END,2026-09-18 12:57:44,For tomorrows assessment,2,Visual Studio Code | Google Chrome,Completed,study DSA
+92412939-52d8-43aa-875e-f882be6ef0b6,START,2026-09-18 13:06:35,rrr,1,Visual Studio Code,,rrr
+92412939-52d8-43aa-875e-f882be6ef0b6,END,2026-09-18 13:07:35,rrr,1,Visual Studio Code,Completed,rrr
+67657bc5-fd7e-4684-9959-28fca1e8343f,START,2026-09-18 13:18:45,f,1,Visual Studio Code,,ttt
+67657bc5-fd7e-4684-9959-28fca1e8343f,END,2026-09-18 13:19:51,f,1,Visual Studio Code,Completed,ttt
+0d1017d6-7717-4179-91d2-1f31f08ed625,START,2026-09-19 09:09:26,exam,1,Visual Studio Code | Google Chrome,,study
+0d1017d6-7717-4179-91d2-1f31f08ed625,END,2026-09-19 09:10:33,exam,1,Visual Studio Code | Google Chrome,Completed,study
+44e8702d-8eb3-40e6-bf25-e3c8f4d14f57,START,2026-09-19 10:47:39,exam,1,Visual Studio Code | Google Chrome,,coding
+44e8702d-8eb3-40e6-bf25-e3c8f4d14f57,END,2026-09-19 10:48:45,exam,1,Visual Studio Code | Google Chrome,Completed,coding
+9ea33bc7-9be9-4cf9-9f7b-7a73c0d70f4a,START,2026-09-19 12:17:43,exam,1,Visual Studio Code | Google Chrome,,study
+9ea33bc7-9be9-4cf9-9f7b-7a73c0d70f4a,END,2026-09-19 12:48:48,exam,1,Visual Studio Code | Google Chrome,Stopped,study
+692aba3b-db94-4016-8c25-da60b3b0986f,START,2026-09-19 12:49:08,for assessment,1,Visual Studio Code | Google Chrome,,DSA
+692aba3b-db94-4016-8c25-da60b3b0986f,END,2026-09-19 13:03:40,for assessment,1,Visual Studio Code | Google Chrome,Stopped,DSA

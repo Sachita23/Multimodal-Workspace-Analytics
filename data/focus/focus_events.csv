@@ -1,0 +1,130 @@
+timestamp,focus_session_id,goal,application,window_title,allowed,status,remaining_seconds,title
+2026-09-18 10:14:51,ef576f2a-7b6e-44a0-9ed3-6f86063fd7ad,Study,Python,Focus Assistant,True,Within focus goal,1498,
+2026-09-18 10:14:57,ef576f2a-7b6e-44a0-9ed3-6f86063fd7ad,Study,Google Chrome,Dashboard UI Specification - Google Chrome,True,Within focus goal,1492,
+2026-09-18 10:15:01,ef576f2a-7b6e-44a0-9ed3-6f86063fd7ad,Study,Visual Studio Code,run_focus_assistant.py - Capestone Project 1 - Visual Studio Code,True,Within focus goal,1488,
+2026-09-18 10:15:03,ef576f2a-7b6e-44a0-9ed3-6f86063fd7ad,Study,Google Chrome,Dashboard UI Specification - Google Chrome,True,Within focus goal,1486,
+2026-09-18 10:15:07,ef576f2a-7b6e-44a0-9ed3-6f86063fd7ad,Study,Mscopilot,Copilot,False,Outside declared focus apps,1482,
+2026-09-18 10:22:31,0281e048-066e-4c80-8d85-6416252582d4,temppp,Python,Focus Assistant,True,Within focus goal,1019,
+2026-09-18 10:22:35,0281e048-066e-4c80-8d85-6416252582d4,temppp,File Explorer,Task Switching,False,Outside declared focus apps,1015,
+2026-09-18 10:22:37,0281e048-066e-4c80-8d85-6416252582d4,temppp,Visual Studio Code,run_focus_assistant.py - Capestone Project 1 - Visual Studio Code,True,Within focus goal,1013,
+2026-09-18 10:22:39,0281e048-066e-4c80-8d85-6416252582d4,temppp,Google Chrome,Dashboard UI Specification - Google Chrome,True,Within focus goal,1011,
+2026-09-18 10:22:49,0281e048-066e-4c80-8d85-6416252582d4,temppp,Python,Focus Assistant,True,Within focus goal,1001,
+2026-09-18 10:35:02,e289acd2-db09-47d5-b7cb-b9b4a8d5d438,coding,Python,Focus Timer,False,Outside declared focus apps,1499,
+2026-09-18 10:35:08,e289acd2-db09-47d5-b7cb-b9b4a8d5d438,coding,File Explorer,Task Switching,True,Within focus goal,1493,
+2026-09-18 10:35:11,e289acd2-db09-47d5-b7cb-b9b4a8d5d438,coding,Google Chrome,Dashboard UI Specification - Google Chrome,True,Within focus goal,1490,
+2026-09-18 10:35:12,e289acd2-db09-47d5-b7cb-b9b4a8d5d438,coding,File Explorer,Program Manager,True,Within focus goal,1488,
+2026-09-18 10:35:14,e289acd2-db09-47d5-b7cb-b9b4a8d5d438,coding,Google Chrome,Dashboard UI Specification - Google Chrome,True,Within focus goal,1487,
+2026-09-18 10:35:15,e289acd2-db09-47d5-b7cb-b9b4a8d5d438,coding,Searchhost,Search,False,Outside declared focus apps,1485,
+2026-09-18 10:35:17,e289acd2-db09-47d5-b7cb-b9b4a8d5d438,coding,Applicationframehost,Calculator,False,Outside declared focus apps,1484,
+2026-09-18 10:35:23,e289acd2-db09-47d5-b7cb-b9b4a8d5d438,coding,File Explorer,Task Switching,True,Within focus goal,1478,
+2026-09-18 10:35:24,e289acd2-db09-47d5-b7cb-b9b4a8d5d438,coding,Python,Focus Assistant,True,Within focus goal,1476,
+2026-09-18 10:35:32,e289acd2-db09-47d5-b7cb-b9b4a8d5d438,coding,Python,Focus Timer,False,Outside declared focus apps,1469,
+2026-09-18 11:12:01,e384bb82-4563-4a46-9e86-203cabb03c58,study for placement exam,Python,Focus Timer,False,Focus deviation,59,coding
+2026-09-18 11:12:11,e384bb82-4563-4a46-9e86-203cabb03c58,study for placement exam,File Explorer,Task Switching,False,Focus deviation,49,coding
+2026-09-18 11:12:12,e384bb82-4563-4a46-9e86-203cabb03c58,study for placement exam,Visual Studio Code,run_focus_assistant.py - Capestone Project 1 - Visual Studio Code,True,Within focus zone,48,coding
+2026-09-18 11:12:14,e384bb82-4563-4a46-9e86-203cabb03c58,study for placement exam,File Explorer,Task Switching,False,Focus deviation,46,coding
+2026-09-18 11:12:15,e384bb82-4563-4a46-9e86-203cabb03c58,study for placement exam,Python,Focus Timer,False,Focus deviation,45,coding
+2026-09-18 11:12:17,e384bb82-4563-4a46-9e86-203cabb03c58,study for placement exam,Visual Studio Code,run_focus_assistant.py - Capestone Project 1 - Visual Studio Code,True,Within focus zone,43,coding
+2026-09-18 11:12:19,e384bb82-4563-4a46-9e86-203cabb03c58,study for placement exam,Python,Focus Timer,False,Focus deviation,41,coding
+2026-09-18 11:12:22,e384bb82-4563-4a46-9e86-203cabb03c58,study for placement exam,Visual Studio Code,run_focus_assistant.py - Capestone Project 1 - Visual Studio Code,True,Within focus zone,38,coding
+2026-09-18 11:12:31,e384bb82-4563-4a46-9e86-203cabb03c58,study for placement exam,File Explorer,Unknown,False,Focus deviation,29,coding
+2026-09-18 11:12:32,e384bb82-4563-4a46-9e86-203cabb03c58,study for placement exam,Mscopilot,Copilot,False,Focus deviation,28,coding
+2026-09-18 11:12:36,e384bb82-4563-4a46-9e86-203cabb03c58,study for placement exam,File Explorer,Task Switching,False,Focus deviation,24,coding
+2026-09-18 11:12:37,e384bb82-4563-4a46-9e86-203cabb03c58,study for placement exam,Visual Studio Code,run_focus_assistant.py - Capestone Project 1 - Visual Studio Code,True,Within focus zone,23,coding
+2026-09-18 11:12:45,e384bb82-4563-4a46-9e86-203cabb03c58,study for placement exam,File Explorer,Task Switching,False,Focus deviation,15,coding
+2026-09-18 11:12:47,e384bb82-4563-4a46-9e86-203cabb03c58,study for placement exam,Google Chrome,Dashboard UI Specification - Google Chrome,True,Within focus zone,13,coding
+2026-09-18 11:12:51,e384bb82-4563-4a46-9e86-203cabb03c58,study for placement exam,Microsoft Edge,Focus: Stay on Task Without Distractions in Windows | Microsoft Support - Profile 3 - Microsoft​ Edge,False,Focus deviation,9,coding
+2026-09-18 11:12:58,e384bb82-4563-4a46-9e86-203cabb03c58,study for placement exam,Python,Focus deviation,False,Focus deviation,3,coding
+2026-09-18 12:55:45,c7d3ff51-9640-4979-add6-48905e40bf96,For tomorrows assessment,Python,Focus Timer,False,Focus deviation,119,study DSA
+2026-09-18 12:55:48,c7d3ff51-9640-4979-add6-48905e40bf96,For tomorrows assessment,Python,Focus Assistant,True,Within focus zone,117,study DSA
+2026-09-18 12:55:49,c7d3ff51-9640-4979-add6-48905e40bf96,For tomorrows assessment,File Explorer,Task Switching,False,Focus deviation,116,study DSA
+2026-09-18 12:55:50,c7d3ff51-9640-4979-add6-48905e40bf96,For tomorrows assessment,Visual Studio Code,run_focus_assistant.py - Capestone Project 1 - Visual Studio Code,True,Within focus zone,114,study DSA
+2026-09-18 12:56:09,c7d3ff51-9640-4979-add6-48905e40bf96,For tomorrows assessment,Microsoft Edge,New tab - Profile 3 - Microsoft​ Edge,False,Focus deviation,95,study DSA
+2026-09-18 12:56:12,c7d3ff51-9640-4979-add6-48905e40bf96,For tomorrows assessment,Python,Focus deviation,False,Focus deviation,92,study DSA
+2026-09-18 12:56:14,c7d3ff51-9640-4979-add6-48905e40bf96,For tomorrows assessment,File Explorer,Task Switching,False,Focus deviation,90,study DSA
+2026-09-18 12:56:15,c7d3ff51-9640-4979-add6-48905e40bf96,For tomorrows assessment,Microsoft Edge,New tab - Profile 3 - Microsoft​ Edge,False,Focus deviation,89,study DSA
+2026-09-18 12:56:17,c7d3ff51-9640-4979-add6-48905e40bf96,For tomorrows assessment,File Explorer,Unknown,False,Focus deviation,87,study DSA
+2026-09-18 12:56:18,c7d3ff51-9640-4979-add6-48905e40bf96,For tomorrows assessment,Mscopilot,Copilot,False,Focus deviation,86,study DSA
+2026-09-18 12:56:24,c7d3ff51-9640-4979-add6-48905e40bf96,For tomorrows assessment,File Explorer,Task Switching,False,Focus deviation,80,study DSA
+2026-09-18 12:56:25,c7d3ff51-9640-4979-add6-48905e40bf96,For tomorrows assessment,Visual Studio Code,run_focus_assistant.py - Capestone Project 1 - Visual Studio Code,True,Within focus zone,79,study DSA
+2026-09-18 12:56:29,c7d3ff51-9640-4979-add6-48905e40bf96,For tomorrows assessment,File Explorer,Task Switching,False,Focus deviation,75,study DSA
+2026-09-18 12:56:34,c7d3ff51-9640-4979-add6-48905e40bf96,For tomorrows assessment,Google Chrome,Dashboard UI Specification - Google Chrome,True,Within focus zone,70,study DSA
+2026-09-18 12:56:35,c7d3ff51-9640-4979-add6-48905e40bf96,For tomorrows assessment,Visual Studio Code,run_focus_assistant.py - Capestone Project 1 - Visual Studio Code,True,Within focus zone,69,study DSA
+2026-09-18 12:56:36,c7d3ff51-9640-4979-add6-48905e40bf96,For tomorrows assessment,Google Chrome,Dashboard UI Specification - Google Chrome,True,Within focus zone,68,study DSA
+2026-09-18 12:56:44,c7d3ff51-9640-4979-add6-48905e40bf96,For tomorrows assessment,File Explorer,Task Switching,False,Focus deviation,60,study DSA
+2026-09-18 12:56:45,c7d3ff51-9640-4979-add6-48905e40bf96,For tomorrows assessment,Google Chrome,Dashboard UI Specification - Google Chrome,True,Within focus zone,59,study DSA
+2026-09-18 12:56:46,c7d3ff51-9640-4979-add6-48905e40bf96,For tomorrows assessment,Visual Studio Code,run_focus_assistant.py - Capestone Project 1 - Visual Studio Code,True,Within focus zone,58,study DSA
+2026-09-18 12:56:47,c7d3ff51-9640-4979-add6-48905e40bf96,For tomorrows assessment,Google Chrome,Dashboard UI Specification - Google Chrome,True,Within focus zone,57,study DSA
+2026-09-18 12:56:48,c7d3ff51-9640-4979-add6-48905e40bf96,For tomorrows assessment,File Explorer,Task Switching,False,Focus deviation,56,study DSA
+2026-09-18 12:56:49,c7d3ff51-9640-4979-add6-48905e40bf96,For tomorrows assessment,Google Chrome,Dashboard UI Specification - Google Chrome,True,Within focus zone,55,study DSA
+2026-09-18 12:56:50,c7d3ff51-9640-4979-add6-48905e40bf96,For tomorrows assessment,File Explorer,Task Switching,False,Focus deviation,54,study DSA
+2026-09-18 12:56:52,c7d3ff51-9640-4979-add6-48905e40bf96,For tomorrows assessment,Visual Studio Code,run_focus_assistant.py - Capestone Project 1 - Visual Studio Code,True,Within focus zone,53,study DSA
+2026-09-18 13:06:35,92412939-52d8-43aa-875e-f882be6ef0b6,rrr,Python,Focus Timer,False,Focus deviation,59,rrr
+2026-09-18 13:06:40,92412939-52d8-43aa-875e-f882be6ef0b6,rrr,File Explorer,Task Switching,False,Focus deviation,54,rrr
+2026-09-18 13:06:42,92412939-52d8-43aa-875e-f882be6ef0b6,rrr,Google Chrome,Dashboard UI Specification - Google Chrome,False,Focus deviation,52,rrr
+2026-09-18 13:18:49,67657bc5-fd7e-4684-9959-28fca1e8343f,f,Python,Focus Assistant,True,Within focus zone,56,ttt
+2026-09-18 13:18:50,67657bc5-fd7e-4684-9959-28fca1e8343f,f,File Explorer,Task Switching,False,Focus deviation,55,ttt
+2026-09-18 13:18:51,67657bc5-fd7e-4684-9959-28fca1e8343f,f,Visual Studio Code,run_focus_assistant.py - Capestone Project 1 - Visual Studio Code,True,Within focus zone,53,ttt
+2026-09-18 13:18:52,67657bc5-fd7e-4684-9959-28fca1e8343f,f,File Explorer,Task Switching,False,Focus deviation,52,ttt
+2026-09-18 13:18:57,67657bc5-fd7e-4684-9959-28fca1e8343f,f,Python,Focus Assistant,True,Within focus zone,47,ttt
+2026-09-18 13:18:58,67657bc5-fd7e-4684-9959-28fca1e8343f,f,Visual Studio Code,run_focus_assistant.py - Capestone Project 1 - Visual Studio Code,True,Within focus zone,46,ttt
+2026-09-18 13:18:59,67657bc5-fd7e-4684-9959-28fca1e8343f,f,Python,Focus Assistant,True,Within focus zone,45,ttt
+2026-09-18 13:19:00,67657bc5-fd7e-4684-9959-28fca1e8343f,f,File Explorer,Task Switching,False,Focus deviation,44,ttt
+2026-09-18 13:19:02,67657bc5-fd7e-4684-9959-28fca1e8343f,f,Visual Studio Code,run_focus_assistant.py - Capestone Project 1 - Visual Studio Code,True,Within focus zone,42,ttt
+2026-09-18 13:19:03,67657bc5-fd7e-4684-9959-28fca1e8343f,f,Python,Focus Assistant,True,Within focus zone,41,ttt
+2026-09-18 13:19:04,67657bc5-fd7e-4684-9959-28fca1e8343f,f,File Explorer,Task Switching,False,Focus deviation,40,ttt
+2026-09-18 13:19:05,67657bc5-fd7e-4684-9959-28fca1e8343f,f,Visual Studio Code,run_focus_assistant.py - Capestone Project 1 - Visual Studio Code,True,Within focus zone,39,ttt
+2026-09-18 13:19:13,67657bc5-fd7e-4684-9959-28fca1e8343f,f,Google Chrome,(23) Patches | LinkedIn - Google Chrome,False,Focus deviation,31,ttt
+2026-09-18 13:19:18,67657bc5-fd7e-4684-9959-28fca1e8343f,f,File Explorer,Task Switching,False,Focus deviation,26,ttt
+2026-09-18 13:19:19,67657bc5-fd7e-4684-9959-28fca1e8343f,f,Visual Studio Code,run_focus_assistant.py - Capestone Project 1 - Visual Studio Code,True,Within focus zone,25,ttt
+2026-09-18 13:19:20,67657bc5-fd7e-4684-9959-28fca1e8343f,f,Google Chrome,(23) Patches | LinkedIn - Google Chrome,False,Focus deviation,24,ttt
+2026-09-18 13:19:21,67657bc5-fd7e-4684-9959-28fca1e8343f,f,File Explorer,Task Switching,False,Focus deviation,23,ttt
+2026-09-18 13:19:22,67657bc5-fd7e-4684-9959-28fca1e8343f,f,Google Chrome,(23) Patches | LinkedIn - Google Chrome,False,Focus deviation,22,ttt
+2026-09-18 13:19:24,67657bc5-fd7e-4684-9959-28fca1e8343f,f,File Explorer,Task Switching,False,Focus deviation,20,ttt
+2026-09-18 13:19:25,67657bc5-fd7e-4684-9959-28fca1e8343f,f,Google Chrome,(23) Patches | LinkedIn - Google Chrome,False,Focus deviation,19,ttt
+2026-09-18 13:19:28,67657bc5-fd7e-4684-9959-28fca1e8343f,f,Visual Studio Code,run_focus_assistant.py - Capestone Project 1 - Visual Studio Code,True,Within focus zone,16,ttt
+2026-09-18 13:19:31,67657bc5-fd7e-4684-9959-28fca1e8343f,f,File Explorer,Task Switching,False,Focus deviation,13,ttt
+2026-09-18 13:19:33,67657bc5-fd7e-4684-9959-28fca1e8343f,f,Visual Studio Code,run_focus_assistant.py - Capestone Project 1 - Visual Studio Code,True,Within focus zone,11,ttt
+2026-09-18 13:19:35,67657bc5-fd7e-4684-9959-28fca1e8343f,f,File Explorer,Task Switching,False,Focus deviation,9,ttt
+2026-09-18 13:19:38,67657bc5-fd7e-4684-9959-28fca1e8343f,f,File Explorer,Unknown,False,Focus deviation,6,ttt
+2026-09-18 13:19:39,67657bc5-fd7e-4684-9959-28fca1e8343f,f,File Explorer,Task Switching,False,Focus deviation,5,ttt
+2026-09-18 13:19:42,67657bc5-fd7e-4684-9959-28fca1e8343f,f,File Explorer,Unknown,False,Focus deviation,2,ttt
+2026-09-19 09:09:30,0d1017d6-7717-4179-91d2-1f31f08ed625,exam,Google Chrome,frontend - Google Chrome,True,Within focus zone,56,study
+2026-09-19 09:09:32,0d1017d6-7717-4179-91d2-1f31f08ed625,exam,Microsoft Word,Research paper doc - Word,False,Focus deviation,54,study
+2026-09-19 09:09:36,0d1017d6-7717-4179-91d2-1f31f08ed625,exam,Google Chrome,frontend - Google Chrome,True,Within focus zone,50,study
+2026-09-19 09:09:37,0d1017d6-7717-4179-91d2-1f31f08ed625,exam,File Explorer,Task Switching,False,Focus deviation,49,study
+2026-09-19 09:09:38,0d1017d6-7717-4179-91d2-1f31f08ed625,exam,Microsoft Word,Research paper doc - Word,False,Focus deviation,48,study
+2026-09-19 09:09:39,0d1017d6-7717-4179-91d2-1f31f08ed625,exam,Google Chrome,frontend - Google Chrome,True,Within focus zone,47,study
+2026-09-19 09:09:41,0d1017d6-7717-4179-91d2-1f31f08ed625,exam,File Explorer,Task Switching,False,Focus deviation,45,study
+2026-09-19 09:09:42,0d1017d6-7717-4179-91d2-1f31f08ed625,exam,Python,Focus Assistant,True,Within focus zone,44,study
+2026-09-19 09:09:44,0d1017d6-7717-4179-91d2-1f31f08ed625,exam,Google Chrome,frontend - Google Chrome,True,Within focus zone,42,study
+2026-09-19 09:09:45,0d1017d6-7717-4179-91d2-1f31f08ed625,exam,File Explorer,Task Switching,False,Focus deviation,41,study
+2026-09-19 09:09:46,0d1017d6-7717-4179-91d2-1f31f08ed625,exam,Python,Focus Assistant,True,Within focus zone,40,study
+2026-09-19 09:09:52,0d1017d6-7717-4179-91d2-1f31f08ed625,exam,Google Chrome,frontend - Google Chrome,True,Within focus zone,34,study
+2026-09-19 09:09:54,0d1017d6-7717-4179-91d2-1f31f08ed625,exam,File Explorer,Unknown,False,Focus deviation,32,study
+2026-09-19 09:09:55,0d1017d6-7717-4179-91d2-1f31f08ed625,exam,File Explorer,Documents - File Explorer,False,Focus deviation,31,study
+2026-09-19 09:09:57,0d1017d6-7717-4179-91d2-1f31f08ed625,exam,Google Chrome,frontend - Google Chrome,True,Within focus zone,29,study
+2026-09-19 09:10:05,0d1017d6-7717-4179-91d2-1f31f08ed625,exam,File Explorer,Unknown,False,Focus deviation,21,study
+2026-09-19 09:10:07,0d1017d6-7717-4179-91d2-1f31f08ed625,exam,Microsoft PowerPoint,PRC- 2 (1) - PowerPoint,False,Focus deviation,19,study
+2026-09-19 09:10:08,0d1017d6-7717-4179-91d2-1f31f08ed625,exam,Google Chrome,frontend - Google Chrome,True,Within focus zone,18,study
+2026-09-19 10:47:40,44e8702d-8eb3-40e6-bf25-e3c8f4d14f57,exam,File Explorer,Task Switching,False,Focus deviation,58,coding
+2026-09-19 10:47:41,44e8702d-8eb3-40e6-bf25-e3c8f4d14f57,exam,Python,Focus Assistant,True,Within focus zone,57,coding
+2026-09-19 10:47:42,44e8702d-8eb3-40e6-bf25-e3c8f4d14f57,exam,Visual Studio Code,python - Capestone Project 1 - Visual Studio Code,True,Within focus zone,56,coding
+2026-09-19 10:47:43,44e8702d-8eb3-40e6-bf25-e3c8f4d14f57,exam,File Explorer,Task Switching,False,Focus deviation,55,coding
+2026-09-19 10:47:44,44e8702d-8eb3-40e6-bf25-e3c8f4d14f57,exam,Visual Studio Code,focus_gui.py - Capestone Project 1 - Visual Studio Code,True,Within focus zone,54,coding
+2026-09-19 10:47:45,44e8702d-8eb3-40e6-bf25-e3c8f4d14f57,exam,File Explorer,Task Switching,False,Focus deviation,53,coding
+2026-09-19 10:47:46,44e8702d-8eb3-40e6-bf25-e3c8f4d14f57,exam,Google Chrome,Dashboard UI Specification - Google Chrome,True,Within focus zone,52,coding
+2026-09-19 10:47:49,44e8702d-8eb3-40e6-bf25-e3c8f4d14f57,exam,File Explorer,Downloads - File Explorer,False,Focus deviation,49,coding
+2026-09-19 10:47:57,44e8702d-8eb3-40e6-bf25-e3c8f4d14f57,exam,Microsoft Word,Research paper doc - Word,False,Focus deviation,42,coding
+2026-09-19 10:48:31,44e8702d-8eb3-40e6-bf25-e3c8f4d14f57,exam,Visual Studio Code,focus_gui.py - Capestone Project 1 - Visual Studio Code,True,Within focus zone,7,coding
+2026-09-19 12:17:51,9ea33bc7-9be9-4cf9-9f7b-7a73c0d70f4a,exam,Microsoft Edge,frontend - Profile 3 - Microsoft​ Edge,False,Focus deviation,52,study
+2026-09-19 12:17:55,9ea33bc7-9be9-4cf9-9f7b-7a73c0d70f4a,exam,File Explorer,Unknown,False,Focus deviation,48,study
+2026-09-19 12:17:56,9ea33bc7-9be9-4cf9-9f7b-7a73c0d70f4a,exam,Python,Focus Assistant,True,Within focus zone,47,study
+2026-09-19 12:17:58,9ea33bc7-9be9-4cf9-9f7b-7a73c0d70f4a,exam,Microsoft Edge,frontend - Profile 3 - Microsoft​ Edge,False,Focus deviation,45,study
+2026-09-19 12:18:05,9ea33bc7-9be9-4cf9-9f7b-7a73c0d70f4a,exam,File Explorer,Task Switching,False,Focus deviation,38,study
+2026-09-19 12:18:08,9ea33bc7-9be9-4cf9-9f7b-7a73c0d70f4a,exam,Microsoft Edge,frontend - Profile 3 - Microsoft​ Edge,False,Focus deviation,35,study
+2026-09-19 12:18:09,9ea33bc7-9be9-4cf9-9f7b-7a73c0d70f4a,exam,File Explorer,Task Switching,False,Focus deviation,34,study
+2026-09-19 12:18:10,9ea33bc7-9be9-4cf9-9f7b-7a73c0d70f4a,exam,Python,Focus Assistant,True,Within focus zone,33,study
+2026-09-19 12:49:09,692aba3b-db94-4016-8c25-da60b3b0986f,for assessment,Microsoft PowerPoint,DSBDA Team-7 - PowerPoint,False,Focus deviation,58,DSA
+2026-09-19 12:49:37,692aba3b-db94-4016-8c25-da60b3b0986f,for assessment,File Explorer,Task Switching,False,Focus deviation,30,DSA
+2026-09-19 12:49:38,692aba3b-db94-4016-8c25-da60b3b0986f,for assessment,Python,Focus Assistant,True,Within focus zone,29,DSA
