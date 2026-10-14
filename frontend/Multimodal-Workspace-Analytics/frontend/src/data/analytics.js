@@ -31,12 +31,31 @@ function round(value, decimals = 2) {
 
 export async function loadAnalyticsData() {
 
-  const response = await fetch(`${ANALYTICS_API}?t=${Date.now()}`, {
-    cache: "no-store",
-  });
+  let response;
+
+  try {
+    response = await fetch(`${ANALYTICS_API}?t=${Date.now()}`, {
+      cache: "no-store",
+    });
+  } catch {
+    throw new Error(
+      "Can't reach the dashboard server. Start the project with " +
+      "`python start_project.py` and reload this page."
+    );
+  }
+
+  if (response.status === 404) {
+    throw new Error(
+      "No processed data yet. The collector and live pipeline create it " +
+      "within a minute of starting `python start_project.py`."
+    );
+  }
 
   if (!response.ok) {
-    throw new Error("Unable to load CSV dataset");
+    throw new Error(
+      "The API server isn't responding. Start it with " +
+      "`python api/server.py` (or `python start_project.py`)."
+    );
   }
 
   const csvText = await response.text();

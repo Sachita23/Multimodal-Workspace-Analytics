@@ -65,24 +65,29 @@ pip install -r requirements.txt
 
 # Listen on the network so members can connect. Debug mode is switched
 # off automatically when the host is not localhost.
-WORKSPACE_API_HOST=0.0.0.0 python api/server.py
+WORKSPACE_API_HOST=0.0.0.0 WORKSPACE_API_PORT=5050 python start_project.py
 ```
+
+Invites created on the Team page then include this machine's network
+address, so members can copy the join command as-is. Before inviting
+people, have one member open `http://YOUR-IP:5050/api/health` in a
+browser: campus and office Wi-Fi often block laptops from reaching each
+other. If it doesn't load, use a shared hotspot or a VPN such as Tailscale.
 
 The server prints the **admin key**, which is also saved to
 `data/team/admin_key`. Start the dashboard (`npm run dev` in
 `frontend/Multimodal-Workspace-Analytics/frontend`), open **Team**, paste
 the key, and create an invite for each member.
 
-> **macOS:** AirPlay Receiver also uses port 5000. Either turn it off in
-> System Settings > General > AirDrop & Handoff, or run the server with
-> `WORKSPACE_API_PORT=5050` (and point the Vite proxy in `vite.config.js`
-> at it).
+> **macOS:** AirPlay Receiver holds port 5000 on the network, which is why
+> the command above uses 5050. The dashboard's proxy follows
+> `WORKSPACE_API_PORT` automatically.
 
 ### Each member
 
 ```bash
 pip install -r requirements.txt
-python collector/team_sync.py join --server http://MAIN-USER-IP:5000 --invite CODE
+python collector/team_sync.py join --server http://MAIN-USER-IP:5050 --invite CODE
 python collector/team_sync.py run            # Ctrl+C to stop
 python collector/team_sync.py status         # what is stored on the server
 python collector/team_sync.py leave          # leave and delete your data

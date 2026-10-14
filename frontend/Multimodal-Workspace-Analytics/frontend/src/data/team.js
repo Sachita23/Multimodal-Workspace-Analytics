@@ -36,15 +36,25 @@ export function setAdminKey(key) {
 
 
 async function request(path, options = {}) {
-  const response = await fetch(`${TEAM_API}${path}`, {
-    ...options,
-    cache: "no-store",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Admin-Key": getAdminKey(),
-      ...options.headers,
-    },
-  });
+  let response;
+
+  try {
+    response = await fetch(`${TEAM_API}${path}`, {
+      ...options,
+      cache: "no-store",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Admin-Key": getAdminKey(),
+        ...options.headers,
+      },
+    });
+  } catch {
+    throw new TeamApiError(
+      "Can't reach the dashboard server. Start the project with " +
+      "`python start_project.py` and reload this page.",
+      0
+    );
+  }
 
   let body = null;
 
@@ -52,6 +62,15 @@ async function request(path, options = {}) {
     body = await response.json();
   } catch {
     body = null;
+  }
+
+  // The Vite proxy answers 5xx with no JSON when the Flask API isn't running.
+  if (!response.ok && !body?.error && response.status >= 500) {
+    throw new TeamApiError(
+      "The API server isn't responding. Start it with " +
+      "`python api/server.py` (or `python start_project.py`).",
+      response.status
+    );
   }
 
   if (!response.ok) {

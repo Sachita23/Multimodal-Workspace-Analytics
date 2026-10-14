@@ -75,7 +75,7 @@ function InvitePanel({ onCreated }) {
   }
 
   const command = invite
-    ? `python collector/team_sync.py join --server http://YOUR-IP:5000 --invite ${invite.invite_code}`
+    ? `python collector/team_sync.py join --server ${invite.server_url || "http://YOUR-IP:5000"} --invite ${invite.invite_code}`
     : "";
 
   async function copy() {
@@ -118,8 +118,12 @@ function InvitePanel({ onCreated }) {
         <div className="invite-result">
           <p>
             Send <strong>{invite.name}</strong> this command to run on their machine
-            from the project folder. Replace <code>YOUR-IP</code> with this computer's
-            address. This code is shown only once.
+            from the project folder. This code is shown only once.
+            {!invite.server_url && (
+              <> The server only accepts connections from this computer right now:
+              restart it with <code>WORKSPACE_API_HOST=0.0.0.0</code> so members can reach it,
+              and replace <code>YOUR-IP</code> with this computer's address.</>
+            )}
           </p>
           <div className="invite-command">
             <code>{command}</code>

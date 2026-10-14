@@ -39,7 +39,7 @@ FRONTEND_DIR = (
     / "frontend"
 )
 
-API_URL = "http://127.0.0.1:5000"
+API_URL = f"http://127.0.0.1:{os.environ.get('WORKSPACE_API_PORT', '5000')}"
 DASHBOARD_URL = "http://localhost:5173"
 
 processes = []

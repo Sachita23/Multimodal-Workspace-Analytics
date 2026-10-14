@@ -19,12 +19,15 @@ import hmac
 import math
 import os
 import secrets
+import socket
 from datetime import datetime, timedelta
 from functools import wraps
 
 from flask import Blueprint, current_app, g, jsonify, request
 
 from config import (
+    API_HOST,
+    API_PORT,
     TEAM_ADMIN_KEY_FILE,
     TEAM_CONSENT_VERSION,
     TEAM_MAX_BATCH,
@@ -79,6 +82,30 @@ def init_team(app, admin_key=None, db_file=None):
 
     db.init_db(db_file)
     app.register_blueprint(team_api)
+
+
+def member_server_url():
+    """
+    The address members should use, or None when the server only
+    listens on this machine (members could not reach it).
+    """
+
+    if API_HOST in ("127.0.0.1", "localhost", "::1"):
+        return None
+
+    host = API_HOST
+
+    if host in ("0.0.0.0", "::"):
+        # Connecting a UDP socket sends nothing; it just picks the
+        # interface used for outside traffic.
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+                probe.connect(("192.0.2.1", 80))
+                host = probe.getsockname()[0]
+        except OSError:
+            return None
+
+    return f"http://{host}:{API_PORT}"
 
 
 def _db_file():
@@ -297,6 +324,7 @@ def create_invite():
         "name": name,
         "invite_code": code,
         "expires": member["invite_expires"],
+        "server_url": member_server_url(),
     }), 201
 
 
