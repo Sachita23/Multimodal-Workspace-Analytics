@@ -29,6 +29,7 @@ Thumbs.db
 data/raw/*.csv
 data/processed/*.csv
 data/focus/*.csv
+data/team/
 
 # Logs
 *.log

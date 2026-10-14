@@ -152,6 +152,13 @@ def calculate_time_difference(df):
         .clip(lower=0)
     )
 
+    # A gap long enough to start a new session (laptop asleep,
+    # collector stopped) is not time spent in the next observation.
+    df.loc[
+        df["duration_seconds"] > SESSION_GAP_SECONDS,
+        "duration_seconds"
+    ] = 0
+
     return df
 
 
@@ -307,11 +314,15 @@ def create_sessions(df):
 # --------------------------------------------------
 
 def calculate_total_switches(df):
+    """
+    Total application switches within each workspace
+    session (not a running count across all sessions).
+    """
 
     df["total_application_switches"] = (
-        df["application_switch"]
+        df.groupby("session_id")["application_switch"]
+        .transform("sum")
         .astype(int)
-        .cumsum()
     )
 
     return df

@@ -3,6 +3,7 @@ import time
 import csv
 import os
 import ctypes
+import subprocess
 
 from pathlib import Path
 from datetime import datetime
@@ -22,9 +23,13 @@ if str(PROJECT_ROOT) not in sys.path:
 # ============================================================
 
 import psutil
-import pygetwindow as gw
-import win32gui
-import win32process
+
+IS_WINDOWS = sys.platform.startswith("win")
+IS_MAC = sys.platform == "darwin"
+
+if IS_WINDOWS:
+    import win32gui
+    import win32process
 
 
 # ============================================================
@@ -33,16 +38,9 @@ import win32process
 
 from config import (
     RAW_DATA_FILE,
-    COLLECTION_INTERVAL
+    COLLECTION_INTERVAL,
+    IDLE_THRESHOLD_SECONDS
 )
-
-
-# ============================================================
-# COLLECTOR SETTINGS
-# ============================================================
-
-# User is considered idle after this many seconds
-IDLE_THRESHOLD_SECONDS = 60
 
 
 # ============================================================
@@ -69,38 +67,116 @@ def get_active_application():
     """
 
     try:
-        hwnd = win32gui.GetForegroundWindow()
-
-        if not hwnd:
-            return "Unknown", "Unknown"
-
-        window_title = win32gui.GetWindowText(hwnd)
-
-        try:
-            _, process_id = win32process.GetWindowThreadProcessId(hwnd)
-
-            process = psutil.Process(process_id)
-
-            application_name = process.name()
-
-        except (
-            psutil.NoSuchProcess,
-            psutil.AccessDenied,
-            psutil.ZombieProcess
-        ):
-            application_name = "Unknown"
-
-        application_name = clean_application_name(
-            application_name
-        )
-
-        if not window_title:
-            window_title = "Unknown"
-
-        return application_name, window_title
+        if IS_WINDOWS:
+            application_name, window_title = _active_window_windows()
+        elif IS_MAC:
+            application_name, window_title = _active_window_mac()
+        else:
+            application_name, window_title = _active_window_linux()
 
     except Exception:
         return "Unknown", "Unknown"
+
+    application_name = clean_application_name(
+        application_name
+    )
+
+    if not window_title:
+        window_title = "Unknown"
+
+    return application_name, window_title
+
+
+def _active_window_windows():
+
+    hwnd = win32gui.GetForegroundWindow()
+
+    if not hwnd:
+        return "Unknown", "Unknown"
+
+    window_title = win32gui.GetWindowText(hwnd)
+
+    try:
+        _, process_id = win32process.GetWindowThreadProcessId(hwnd)
+
+        application_name = psutil.Process(process_id).name()
+
+    except (
+        psutil.NoSuchProcess,
+        psutil.AccessDenied,
+        psutil.ZombieProcess
+    ):
+        application_name = "Unknown"
+
+    return application_name, window_title
+
+
+def _run(command, timeout=2):
+    """
+    Run a helper command and return its stripped stdout,
+    or "" if it is missing, fails or times out.
+    """
+
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+    if result.returncode != 0:
+        return ""
+
+    return result.stdout.strip()
+
+
+def _active_window_mac():
+    """
+    Window titles need the Accessibility permission for the
+    terminal running the collector (System Settings > Privacy &
+    Security > Accessibility). Without it only the app name is
+    available.
+    """
+
+    application_name = _run([
+        "osascript", "-e",
+        'tell application "System Events" to get name of '
+        'first application process whose frontmost is true'
+    ]) or "Unknown"
+
+    window_title = _run([
+        "osascript", "-e",
+        'tell application "System Events" to tell '
+        '(first application process whose frontmost is true) '
+        'to get name of front window'
+    ])
+
+    return application_name, window_title
+
+
+def _active_window_linux():
+    """
+    X11 only; needs xdotool. Wayland sessions report Unknown.
+    """
+
+    window_id = _run(["xdotool", "getactivewindow"])
+
+    if not window_id:
+        return "Unknown", "Unknown"
+
+    window_title = _run(["xdotool", "getwindowname", window_id])
+    pid = _run(["xdotool", "getwindowpid", window_id])
+
+    try:
+        application_name = psutil.Process(int(pid)).name()
+    except (ValueError, psutil.Error):
+        application_name = "Unknown"
+
+    return application_name, window_title
 
 
 # ============================================================
@@ -217,38 +293,67 @@ def get_idle_time():
     """
     Get the number of seconds since the user's
     last keyboard or mouse input.
-
-    Windows-specific implementation.
     """
 
     try:
-        last_input_info = LASTINPUTINFO()
-
-        last_input_info.cbSize = ctypes.sizeof(
-            LASTINPUTINFO
-        )
-
-        result = ctypes.windll.user32.GetLastInputInfo(
-            ctypes.byref(last_input_info)
-        )
-
-        if result == 0:
-            return 0.0
-
-        current_tick = ctypes.windll.kernel32.GetTickCount()
-
-        idle_time_ms = (
-            current_tick -
-            last_input_info.dwTime
-        )
-
-        return max(
-            0.0,
-            idle_time_ms / 1000.0
-        )
+        if IS_WINDOWS:
+            return _idle_time_windows()
+        if IS_MAC:
+            return _idle_time_mac()
+        return _idle_time_linux()
 
     except Exception:
         return 0.0
+
+
+def _idle_time_windows():
+
+    last_input_info = LASTINPUTINFO()
+
+    last_input_info.cbSize = ctypes.sizeof(
+        LASTINPUTINFO
+    )
+
+    result = ctypes.windll.user32.GetLastInputInfo(
+        ctypes.byref(last_input_info)
+    )
+
+    if result == 0:
+        return 0.0
+
+    current_tick = ctypes.windll.kernel32.GetTickCount()
+
+    idle_time_ms = (
+        current_tick -
+        last_input_info.dwTime
+    )
+
+    return max(
+        0.0,
+        idle_time_ms / 1000.0
+    )
+
+
+def _idle_time_mac():
+
+    output = _run(["ioreg", "-c", "IOHIDSystem", "-d", "4"])
+
+    for line in output.splitlines():
+        if "HIDIdleTime" in line:
+            nanoseconds = int(line.split("=")[-1].strip())
+            return max(0.0, nanoseconds / 1e9)
+
+    return 0.0
+
+
+def _idle_time_linux():
+    """
+    Needs xprintidle (X11).
+    """
+
+    output = _run(["xprintidle"])
+
+    return max(0.0, int(output) / 1000.0) if output else 0.0
 
 
 # ============================================================

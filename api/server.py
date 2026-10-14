@@ -1,3 +1,4 @@
+import sys
 from pathlib import Path
 
 from flask import Flask, Response, jsonify
@@ -8,6 +9,12 @@ from flask import Flask, Response, jsonify
 # ---------------------------------------------------------
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from config import API_HOST, API_PORT
+from team.api import init_team
 
 PROCESSED_DATA_FILE = (
     PROJECT_ROOT
@@ -22,6 +29,10 @@ PROCESSED_DATA_FILE = (
 # ---------------------------------------------------------
 
 app = Flask(__name__)
+
+init_team(app)
+
+LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 
 # ---------------------------------------------------------
@@ -72,29 +83,39 @@ def analytics_csv():
 
 if __name__ == "__main__":
 
+    # Flask's debugger allows running code from the browser, so it
+    # is only enabled when the server is reachable from this machine.
+    debug = API_HOST in LOOPBACK_HOSTS
+
+    base_url = f"http://{API_HOST}:{API_PORT}"
+
     print("=" * 60)
     print("Workspace Analytics API")
     print("=" * 60)
 
-    print(f"Processed file:")
+    print("Processed file:")
     print(PROCESSED_DATA_FILE)
 
     print()
-    print("API:")
-    print("http://127.0.0.1:5000")
+    print(f"API:        {base_url}")
+    print(f"Health:     {base_url}/api/health")
+    print(f"Analytics:  {base_url}/api/analytics.csv")
+    print(f"Team:       {base_url}/api/team/...")
 
     print()
-    print("Health:")
-    print("http://127.0.0.1:5000/api/health")
+    print("Team admin key (paste into the Team page):")
+    print(app.config["TEAM_ADMIN_KEY"])
 
-    print()
-    print("Analytics:")
-    print("http://127.0.0.1:5000/api/analytics.csv")
+    if not debug:
+        print()
+        print("Listening beyond this machine: debug mode is OFF.")
+        print("Members' data travels over plain HTTP. Use a trusted")
+        print("network, or put the server behind HTTPS.")
 
     print("=" * 60)
 
     app.run(
-        host="127.0.0.1",
-        port=5000,
-        debug=True
+        host=API_HOST,
+        port=API_PORT,
+        debug=debug
     )

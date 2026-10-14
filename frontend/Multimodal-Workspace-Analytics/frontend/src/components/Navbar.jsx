@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Activity, AlertTriangle, AppWindow, Bell, Brain, LayoutDashboard, Menu, Search, Settings, Sparkles, TrendingUp, X } from "lucide-react";
+import { Activity, AlertTriangle, AppWindow, Bell, Brain, LayoutDashboard, Menu, Search, Settings, Sparkles, TrendingUp, Users, X } from "lucide-react";
 import { NavLink } from "react-router-dom";
 
 const navigation = [
@@ -10,6 +10,7 @@ const navigation = [
   { to: "/trends", label: "Trends", icon: TrendingUp },
   { to: "/anomalies", label: "Anomalies", icon: AlertTriangle },
   { to: "/insights", label: "Insights", icon: Sparkles },
+  { to: "/team", label: "Team", icon: Users },
   { to: "/settings", label: "Settings", icon: Settings },
 ];
 

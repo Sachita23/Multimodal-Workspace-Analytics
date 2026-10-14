@@ -14,6 +14,15 @@ MODEL_FEATURES = [
 # with extremely small datasets.
 MIN_SAMPLES = 20
 
+# Robust distance (in MAD-scaled standard deviations, averaged
+# over features) above which an observation counts as unusual.
+# A fixed cut-off means a dataset with no unusual behaviour
+# flags nothing, instead of always flagging its top 10%.
+ANOMALY_DISTANCE = 3.5
+
+# Distance that maps to an anomaly_score of 1.0.
+SCORE_SCALE = ANOMALY_DISTANCE * 2
+
 
 def _prepare_features(df):
     """
@@ -47,101 +56,64 @@ def _prepare_features(df):
     return features
 
 
-def _standardize(values):
+def robust_scale(values):
     """
-    Standardize values using NumPy.
+    Scale each column by its median and MAD.
+
+    MAD is used instead of the standard deviation so a few
+    extreme observations cannot hide themselves by inflating
+    the spread. When over half the values are identical the MAD
+    is 0, so the mean absolute deviation is used instead
+    (Iglewicz & Hoaglin); columns with no spread at all get 1.
     """
-
-    mean = values.mean(
-        axis=0
-    )
-
-    std = values.std(
-        axis=0
-    )
-
-    # Prevent division by zero.
-    std[std == 0] = 1.0
-
-    scaled = (
-        values - mean
-    ) / std
-
-    return scaled
-
-
-def _calculate_distance_scores(values):
-    """
-    Measure how far each observation is from
-    the typical behavioral profile.
-
-    Output range:
-        0 -> very typical
-        1 -> highly unusual
-    """
-
-    if len(values) == 0:
-        return np.array([])
 
     center = np.median(
         values,
         axis=0
     )
 
-    distances = np.linalg.norm(
-        values - center,
-        axis=1
-    )
+    deviation = np.abs(values - center)
 
-    # If every observation is effectively identical,
-    # there is no evidence of an anomaly.
-    if np.allclose(
-        distances,
-        distances[0]
-    ):
-        return np.zeros(
-            len(distances),
-            dtype=float
+    mad = np.median(
+        deviation,
+        axis=0
+    ) * 1.4826
+
+    mean_ad = deviation.mean(
+        axis=0
+    ) * 1.2533
+
+    spread = np.where(mad > 0, mad, mean_ad)
+    spread = np.where(spread > 0, spread, 1.0)
+
+    return (values - center) / spread
+
+
+def _calculate_distances(scaled):
+    """
+    Root-mean-square robust z-score per observation.
+
+    0 -> exactly typical, larger -> more unusual.
+    """
+
+    if len(scaled) == 0:
+        return np.array([])
+
+    return np.sqrt(
+        np.mean(
+            scaled ** 2,
+            axis=1
         )
-
-    low = np.percentile(
-        distances,
-        5
     )
-
-    high = np.percentile(
-        distances,
-        95
-    )
-
-    if high <= low:
-        return np.zeros(
-            len(distances),
-            dtype=float
-        )
-
-    scores = (
-        distances - low
-    ) / (
-        high - low
-    )
-
-    scores = np.clip(
-        scores,
-        0,
-        1
-    )
-
-    return scores
 
 
 def run_anomaly_detection(df):
     """
     Add:
-        anomaly_score
+        anomaly_score  (0 typical -> 1 highly unusual)
         is_anomaly
 
-    Uses statistical distance from the normal
+    Uses robust statistical distance from the normal
     behavioral profile.
     """
 
@@ -171,7 +143,7 @@ def run_anomaly_detection(df):
         dtype=float
     )
 
-    scaled = _standardize(
+    scaled = robust_scale(
         values
     )
 
@@ -180,46 +152,15 @@ def run_anomaly_detection(df):
     # ANOMALY SCORES
     # ---------------------------------------------------------
 
-    scores = _calculate_distance_scores(
+    distances = _calculate_distances(
         scaled
     )
 
     df["anomaly_score"] = np.round(
-        scores,
+        np.clip(distances / SCORE_SCALE, 0, 1),
         4
     )
 
-
-    # ---------------------------------------------------------
-    # HANDLE NO-VARIATION CASE
-    # ---------------------------------------------------------
-
-    if len(scores) == 0 or np.allclose(
-        scores,
-        0
-    ):
-
-        df["is_anomaly"] = False
-
-        return df
-
-
-    # ---------------------------------------------------------
-    # ANOMALY THRESHOLD
-    # ---------------------------------------------------------
-
-    threshold = np.percentile(
-        scores,
-        90
-    )
-
-    # Require both:
-    # 1. score above threshold
-    # 2. score has some meaningful magnitude
-    df["is_anomaly"] = (
-        (scores > threshold)
-        &
-        (scores >= 0.60)
-    )
+    df["is_anomaly"] = distances >= ANOMALY_DISTANCE
 
     return df

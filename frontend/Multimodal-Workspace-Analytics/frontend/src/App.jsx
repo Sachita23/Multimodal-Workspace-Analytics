@@ -14,6 +14,8 @@ import Trends from "./pages/Trends";
 import Anomalies from "./pages/Anomalies";
 import Insights from "./pages/Insights";
 import Settings from "./pages/Settings";
+import Team from "./pages/Team";
+import TeamMember from "./pages/TeamMember";
 
 
 function App() {
@@ -49,6 +51,10 @@ function App() {
         <Route path="/anomalies" element={<Anomalies />} />
 
         <Route path="/insights" element={<Insights />} />
+
+        <Route path="/team" element={<Team />} />
+
+        <Route path="/team/:memberId" element={<TeamMember />} />
 
         <Route path="/settings" element={<Settings />} />
 
