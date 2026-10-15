@@ -1,19 +1,29 @@
 """
-Fill the team database with simulated members, for demos and tests.
+Fill a team database with simulated members, for offline demos and tests.
 
-    python -m team.simulate            # 5 members, 3 days each
-    python -m team.simulate --reset    # wipe the team DB first
+    python -m team.simulate                        # 5 members, 3 days each, in data/team/demo.db
+    python -m team.simulate --reset                # recreate data/team/demo.db first
+    python -m team.simulate --db data/team/team.db # add them to another DB (marked as simulated)
 
 Every simulated member goes through the real invite -> consent ->
 token flow, so the data looks exactly like collector uploads.
+
+To see the demo DB in the dashboard, start the API with
+WORKSPACE_TEAM_DB=data/team/demo.db. For live demo members streaming
+into a running server instead, use `python start_project.py --demo`.
 """
 
 import argparse
 import random
+import sys
 from datetime import datetime, timedelta
+from pathlib import Path
 
-from config import TEAM_CONSENT_VERSION, TEAM_DB_FILE, TEAM_SHARED_FIELDS
+from config import TEAM_CONSENT_VERSION, TEAM_DATA_DIR, TEAM_SHARED_FIELDS
 from team import db
+
+
+DEMO_DB_FILE = TEAM_DATA_DIR / "demo.db"
 
 
 # name: (apps with weights, mean seconds between switches, idle share)
@@ -107,7 +117,7 @@ def generate_member_rows(profile, days=3, interval=5, seed=0, start=None):
 
 
 def add_simulated_member(name, profile, days=3, seed=0, db_file=None):
-    _, code = db.create_invite(name, db_file)
+    _, code = db.create_invite(name, db_file, simulated=True)
     member_id, _, token = db.redeem_invite(
         code, TEAM_CONSENT_VERSION, TEAM_SHARED_FIELDS, db_file
     )
@@ -116,25 +126,50 @@ def add_simulated_member(name, profile, days=3, seed=0, db_file=None):
     return member_id, token
 
 
-def main():
+def real_member_count(db_file):
+    """
+    Members in `db_file` that were not created by a simulator.
+    """
+
+    if not Path(db_file).exists():
+        return 0
+
+    return sum(not m.get("simulated") for m in db.list_members(db_file))
+
+
+def main(argv=None):
     parser = argparse.ArgumentParser(description="Simulate team members.")
     parser.add_argument("--days", type=int, default=3)
+    parser.add_argument("--db", type=Path, default=DEMO_DB_FILE,
+                        help=f"team database to fill (default: {DEMO_DB_FILE})")
     parser.add_argument("--reset", action="store_true",
-                        help="delete the team database first")
-    args = parser.parse_args()
+                        help="delete that database first (refused if it has real members)")
+    parser.add_argument("--force", action="store_true",
+                        help="allow --reset even when real members would be deleted")
+    args = parser.parse_args(argv)
 
     if args.reset:
-        for suffix in ("", "-wal", "-shm"):
-            TEAM_DB_FILE.with_name(TEAM_DB_FILE.name + suffix).unlink(missing_ok=True)
+        real = real_member_count(args.db)
 
-    db.init_db()
+        if real and not args.force:
+            print(f"Refusing to reset {args.db}: it has {real} real member(s) whose "
+                  "data and collector tokens would be lost. Use a different --db, "
+                  "or add --force if you really mean it.")
+            return 1
+
+        for suffix in ("", "-wal", "-shm"):
+            args.db.with_name(args.db.name + suffix).unlink(missing_ok=True)
+
+    db.init_db(args.db)
 
     for seed, (name, profile) in enumerate(PROFILES.items()):
-        member_id, _ = add_simulated_member(name, profile, args.days, seed)
+        member_id, _ = add_simulated_member(name, profile, args.days, seed, args.db)
         print(f"Added {name} (member {member_id})")
 
-    print(f"\nTeam database: {TEAM_DB_FILE}")
+    print(f"\nTeam database: {args.db}")
+    print(f"View it with: WORKSPACE_TEAM_DB={args.db} python start_project.py")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

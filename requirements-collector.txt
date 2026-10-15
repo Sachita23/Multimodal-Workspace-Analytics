@@ -1,0 +1,9 @@
+# For team members who only run the collector
+# (collector/team_sync.py). Works with Python 3.9 or newer, including
+# the python3 that ships with macOS. The main user installs
+# requirements.txt instead.
+#
+#   pip install -r requirements-collector.txt
+
+psutil==7.2.2
+pywin32==312; sys_platform == "win32"

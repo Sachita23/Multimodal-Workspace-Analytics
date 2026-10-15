@@ -9,9 +9,11 @@ Member endpoints (Authorization: Bearer <member token>):
 
 Main-user endpoints (X-Admin-Key: <admin key>):
     POST   /api/team/invites
-    GET    /api/team/overview
-    GET    /api/team/members/<id>
-    GET    /api/team/members/<id>/activity
+    GET    /api/team/overview                ?days=1|7|30|all
+    GET    /api/team/live                    current activity, ETag
+    GET    /api/team/members/<id>            ?days=1|7|30|all
+    GET    /api/team/members/<id>/activity   ?limit&before&after&offset
+    POST   /api/team/members/<id>/invite     new code for a pending member
     DELETE /api/team/members/<id>
 """
 
@@ -20,8 +22,11 @@ import math
 import os
 import secrets
 import socket
+import sys
+import tempfile
 from datetime import datetime, timedelta
 from functools import wraps
+from pathlib import Path
 
 from flask import Blueprint, current_app, g, jsonify, request
 
@@ -42,39 +47,124 @@ MAX_TEXT_LENGTH = 512
 ACTIVITY_STATUSES = {"Active", "Idle", "Unknown"}
 TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
 
+# Shorter admin keys (including an empty key file) are treated as
+# missing and replaced, so the admin API is never left open.
+MIN_ADMIN_KEY_LENGTH = 16
+
+# Observations older than this are rejected at ingest.
+MAX_OBSERVATION_AGE_DAYS = 90
+
+DAY_CHOICES = {"1": 1, "7": 7, "30": 30, "all": None}
+
 
 # --------------------------------------------------
 # Setup
 # --------------------------------------------------
 
-def load_admin_key():
+def _usable_key(key):
+    key = (key or "").strip()
+    return key if len(key) >= MIN_ADMIN_KEY_LENGTH else None
+
+
+def _write_key_file(path, key, replace):
+    """
+    Write the key with owner-only permissions via a temp file, so
+    a crash never leaves an empty or half-written key file.
+    """
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".admin_key.")
+
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as file:
+            file.write(key)
+
+        os.chmod(tmp, 0o600)
+
+        if replace:
+            os.replace(tmp, path)
+        else:
+            # Exclusive create: if another process created the
+            # file first, keep theirs.
+            os.link(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def load_admin_key(path=None):
     """
     The main user's key: WORKSPACE_TEAM_ADMIN_KEY if set,
     otherwise read from (or created in) data/team/admin_key.
+
+    A key shorter than MIN_ADMIN_KEY_LENGTH characters (including
+    an empty or whitespace-only file) is never used: the file is
+    replaced with a new random key.
     """
 
-    key = os.environ.get("WORKSPACE_TEAM_ADMIN_KEY")
+    path = path or TEAM_ADMIN_KEY_FILE
+    env_key = os.environ.get("WORKSPACE_TEAM_ADMIN_KEY")
 
-    if key:
-        return key
+    if env_key is not None and env_key.strip():
+        key = _usable_key(env_key)
 
-    if TEAM_ADMIN_KEY_FILE.exists():
-        return TEAM_ADMIN_KEY_FILE.read_text(encoding="utf-8").strip()
+        if key:
+            return key
 
-    TEAM_ADMIN_KEY_FILE.parent.mkdir(parents=True, exist_ok=True)
-    key = secrets.token_urlsafe(24)
+        print(
+            f"[WARNING] WORKSPACE_TEAM_ADMIN_KEY is shorter than "
+            f"{MIN_ADMIN_KEY_LENGTH} characters and was ignored; "
+            f"using the key in {path} instead.",
+            file=sys.stderr,
+        )
 
-    fd = os.open(TEAM_ADMIN_KEY_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as file:
-        file.write(key)
+    for _ in range(3):
+        if path.exists():
+            key = _usable_key(path.read_text(encoding="utf-8"))
 
-    return key
+            if key:
+                return key
+
+            # Empty, whitespace or too short: replace it.
+            print(
+                f"[WARNING] The admin key in {path} was empty or shorter "
+                f"than {MIN_ADMIN_KEY_LENGTH} characters; a new key was "
+                "generated.",
+                file=sys.stderr,
+            )
+            key = secrets.token_urlsafe(24)
+            _write_key_file(path, key, replace=True)
+            return key
+
+        key = secrets.token_urlsafe(24)
+
+        try:
+            _write_key_file(path, key, replace=False)
+            return key
+        except FileExistsError:
+            continue  # created by another process; read theirs
+        except OSError:
+            # Filesystems without hard links.
+            _write_key_file(path, key, replace=True)
+            return key
+
+    raise RuntimeError(f"Could not read or create the admin key at {path}")
 
 
 def init_team(app, admin_key=None, db_file=None):
     """
     Register the blueprint and prepare storage.
     """
+
+    admin_key = (admin_key or "").strip()
+
+    if admin_key and len(admin_key) < MIN_ADMIN_KEY_LENGTH:
+        raise ValueError(
+            f"The admin key must be at least {MIN_ADMIN_KEY_LENGTH} characters."
+        )
+
+    # A str path (env var, command line) works the same as a Path.
+    db_file = Path(db_file) if db_file else None
 
     app.config["TEAM_DB_FILE"] = db_file
     app.config["TEAM_ADMIN_KEY"] = admin_key or load_admin_key()
@@ -116,6 +206,51 @@ def _error(message, status):
     return jsonify({"error": message}), status
 
 
+def _json_object():
+    """
+    The request's JSON body as a dict ({} when there is no body),
+    or None when it is valid JSON but not an object.
+    """
+
+    body = request.get_json(silent=True)
+
+    if body is None:
+        return {}
+
+    return body if isinstance(body, dict) else None
+
+
+def _days_arg():
+    """
+    The ?days= window (1, 7, 30 or all; default TEAM_ANALYSIS_DAYS).
+    Returns (days, error_response).
+    """
+
+    raw = request.args.get("days")
+
+    if raw is None or raw == "":
+        return analysis.ANALYSIS_DAYS, None
+
+    if raw not in DAY_CHOICES:
+        return None, _error("days must be 1, 7, 30 or all.", 400)
+
+    return DAY_CHOICES[raw], None
+
+
+def _timestamp_arg(name):
+    """
+    A "YYYY-MM-DD HH:MM:SS" query argument, or None.
+    Raises ValueError when it is present but malformed.
+    """
+
+    raw = request.args.get(name)
+
+    if raw is None or raw == "":
+        return None
+
+    return datetime.strptime(raw, TIMESTAMP_FORMAT).strftime(TIMESTAMP_FORMAT)
+
+
 # --------------------------------------------------
 # Auth
 # --------------------------------------------------
@@ -124,9 +259,14 @@ def require_admin(view):
     @wraps(view)
     def wrapper(*args, **kwargs):
         supplied = request.headers.get("X-Admin-Key", "")
-        expected = current_app.config["TEAM_ADMIN_KEY"]
+        expected = current_app.config.get("TEAM_ADMIN_KEY") or ""
 
-        if not hmac.compare_digest(supplied.encode(), expected.encode()):
+        # An empty key never matches, even an empty header.
+        if (
+            not expected
+            or not supplied
+            or not hmac.compare_digest(supplied.encode(), expected.encode())
+        ):
             return _error("Admin key required.", 401)
 
         return view(*args, **kwargs)
@@ -186,8 +326,11 @@ def validate_observation(raw):
         timestamp = datetime.strptime(raw["timestamp"], TIMESTAMP_FORMAT)
 
         # Collector clocks are local time; allow for time zones
-        # but reject obviously wrong clocks.
-        if timestamp > datetime.now() + timedelta(days=1):
+        # but reject obviously wrong clocks, and very old rows.
+        now = datetime.now()
+        if timestamp > now + timedelta(days=1):
+            return None
+        if timestamp < now - timedelta(days=MAX_OBSERVATION_AGE_DAYS):
             return None
 
         status = raw["activity_status"]
@@ -219,8 +362,15 @@ def validate_observation(raw):
 
 @team_api.post("/join")
 def join():
-    body = request.get_json(silent=True) or {}
+    body = _json_object()
+
+    if body is None:
+        return _error("Expected a JSON object.", 400)
+
     consent = body.get("consent") or {}
+
+    if not isinstance(consent, dict):
+        return _error("Expected 'consent' to be an object.", 400)
 
     if consent.get("accepted") is not True:
         return _error("Consent was not given.", 400)
@@ -258,7 +408,11 @@ def join():
 @team_api.post("/ingest")
 @require_member
 def ingest():
-    body = request.get_json(silent=True) or {}
+    body = _json_object()
+
+    if body is None:
+        return _error("Expected a JSON object.", 400)
+
     rows = body.get("observations")
 
     if not isinstance(rows, list):
@@ -280,9 +434,10 @@ def ingest():
 @team_api.get("/me")
 @require_member
 def me():
-    member = next(
-        m for m in db.list_members(_db_file()) if m["id"] == g.member["id"]
-    )
+    member = db.member_with_stats(g.member["id"], _db_file())
+
+    if member is None:
+        return _error("Unknown or revoked member token.", 401)
 
     return jsonify({
         "member_id": member["id"],
@@ -307,37 +462,109 @@ def leave():
 # Main-user endpoints
 # --------------------------------------------------
 
+def _invite_response(member_id, code):
+    member = db.get_member(member_id, _db_file())
+    server_url = member_server_url()
+    server = server_url or f"http://YOUR-IP:{API_PORT}"
+
+    return jsonify({
+        "member_id": member_id,
+        "name": member["name"],
+        "invite_code": code,
+        "expires": member["invite_expires"],
+        "server_url": server_url,
+        "port": API_PORT,
+        "join_command": (
+            f"python collector/team_sync.py join --server {server} "
+            f"--invite {code}"
+        ),
+        "simulated": bool(member.get("simulated")),
+    }), 201
+
+
 @team_api.post("/invites")
 @require_admin
 def create_invite():
-    body = request.get_json(silent=True) or {}
+    body = _json_object()
+
+    if body is None:
+        return _error("Expected a JSON object.", 400)
+
     name = str(body.get("name", "")).strip()
 
     if not name or len(name) > 80:
         return _error("Give the member a name (up to 80 characters).", 400)
 
-    member_id, code = db.create_invite(name, _db_file())
-    member = db.get_member(member_id, _db_file())
+    simulated = body.get("simulated", False)
 
-    return jsonify({
-        "member_id": member_id,
-        "name": name,
-        "invite_code": code,
-        "expires": member["invite_expires"],
-        "server_url": member_server_url(),
-    }), 201
+    if not isinstance(simulated, bool):
+        return _error("'simulated' must be true or false.", 400)
+
+    member_id, code = db.create_invite(name, _db_file(), simulated=simulated)
+
+    return _invite_response(member_id, code)
+
+
+@team_api.post("/members/<int:member_id>/invite")
+@require_admin
+def reissue_invite(member_id):
+    """
+    A new code and expiry for a member who has not joined yet
+    (pending or expired invite). The old code stops working.
+    """
+
+    if db.get_member(member_id, _db_file()) is None:
+        return _error("No such member.", 404)
+
+    code = db.reissue_invite(member_id, _db_file())
+
+    if code is None:
+        return _error("This member has already joined.", 409)
+
+    return _invite_response(member_id, code)
 
 
 @team_api.get("/overview")
 @require_admin
 def overview():
-    return jsonify(analysis.team_overview(_db_file()))
+    days, error = _days_arg()
+
+    if error:
+        return error
+
+    return jsonify(analysis.team_overview(_db_file(), days))
+
+
+@team_api.get("/live")
+@require_admin
+def live():
+    """
+    What each member is doing now. SQL only; unchanged polls
+    (matching If-None-Match) get 304 without reading observations.
+    """
+
+    members, tag = analysis.live_signature(_db_file())
+
+    if request.if_none_match.contains(tag):
+        response = current_app.response_class(status=304)
+    else:
+        response = jsonify(analysis.team_live(_db_file(), members))
+
+    response.set_etag(tag)
+    response.headers["Cache-Control"] = "no-cache"
+
+    return response
 
 
 @team_api.get("/members/<int:member_id>")
 @require_admin
 def member_detail(member_id):
-    detail = analysis.member_detail(member_id, _db_file())
+    days, error = _days_arg()
+
+    if error:
+        return error
+
+    detail = analysis.member_detail(member_id, _db_file(), days)
 
     if detail is None:
         return _error("No such member.", 404)
@@ -354,9 +581,23 @@ def member_activity(member_id):
     limit = min(max(request.args.get("limit", 100, type=int), 1), 500)
     offset = max(request.args.get("offset", 0, type=int), 0)
 
-    rows, total = db.recent_observations(member_id, limit, offset, _db_file())
+    try:
+        before = _timestamp_arg("before")
+        after = _timestamp_arg("after")
+    except ValueError:
+        return _error("before / after must look like YYYY-MM-DD HH:MM:SS.", 400)
 
-    return jsonify({"total": total, "limit": limit, "offset": offset, "rows": rows})
+    rows, total, has_more = db.recent_observations(
+        member_id, limit, offset, _db_file(), before=before, after=after
+    )
+
+    return jsonify({
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "rows": rows,
+        "has_more": has_more,
+    })
 
 
 @team_api.delete("/members/<int:member_id>")

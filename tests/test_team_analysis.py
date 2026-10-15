@@ -2,9 +2,17 @@ from datetime import datetime, timedelta
 
 import pandas as pd
 
+from config import TEAM_CONSENT_VERSION, TEAM_SHARED_FIELDS
 from ml.anomaly_detection import run_anomaly_detection
+from ml.clustering import label_fits
 from team import analysis, db, simulate
 from tests.conftest import observation
+
+
+# Labels (ml.clustering.assign_labels) that describe a switcher's
+# sessions: many apps and frequent switching fit both, and K-Means
+# may split one person's near-identical sessions between them.
+SWITCHING_LABELS = {"High-switching", "Multitasking"}
 
 
 def _rows(start, minutes, app_cycle, every_seconds=5, idle=0.0):
@@ -105,8 +113,25 @@ def test_behavior_groups_separate_switcher(db_file):
     by_name = {m["name"]: m for m in overview["members"]}
 
     assert overview["behavior_groups"]
-    assert by_name["Eli (context switcher)"]["dominant_behavior"] == "High-switching"
-    assert by_name["Asha (focused dev)"]["dominant_behavior"] != "High-switching"
+    assert overview["behavior_groups_cohort"] == "demo"
+    labels = [group["label"] for group in overview["behavior_groups"]]
+    assert len(labels) == len(set(labels))
+
+    eli = by_name["Eli (context switcher)"]
+    assert eli["dominant_behavior"] in SWITCHING_LABELS
+    assert set(eli["behavior_mix"]) <= SWITCHING_LABELS
+    assert "High-switching" in eli["behavior_mix"]
+    assert not set(by_name["Asha (focused dev)"]["behavior_mix"]) & SWITCHING_LABELS
+
+    # Same labelling as the single-user pipeline: every group shows
+    # the behaviour its name describes.
+    for group in overview["behavior_groups"]:
+        assert label_fits(
+            group["label"],
+            group["avg_idle_ratio"],
+            group["avg_switch_frequency"],
+            group["avg_unique_apps"],
+        ), group
 
     for member in overview["members"]:
         if member["behavior_mix"]:
@@ -179,6 +204,271 @@ def test_results_are_cached_until_data_changes(db_file):
     assert analysis.get_team(db_file) is not first
 
 
+def test_upload_reprocesses_only_that_member(db_file, monkeypatch):
+    ids = _simulated_team(db_file)
+    calls = []
+    real = analysis.process_member_observations
+
+    def spy(raw):
+        calls.append(len(raw))
+        return real(raw)
+
+    monkeypatch.setattr(analysis, "process_member_observations", spy)
+
+    analysis.team_overview(db_file)
+    assert len(calls) == len(ids)
+
+    calls.clear()
+    analysis.team_overview(db_file)
+    analysis.member_detail(ids["Chen (analyst)"], db_file)
+    assert calls == []
+
+    asha = ids["Asha (focused dev)"]
+    db.insert_observations(asha, [observation(
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    )], db_file)
+
+    overview = analysis.team_overview(db_file)
+    assert len(calls) == 1
+    by_id = {m["id"]: m for m in overview["members"]}
+    assert by_id[asha]["summary"]["observations"] == calls[0]
+
+    # The groups are rebuilt from the cached sessions of everyone.
+    assert overview["behavior_groups"]
+    assert by_name_dominant(overview, "Eli (context switcher)") in SWITCHING_LABELS
+
+    # A removed member is dropped from the next build.
+    calls.clear()
+    db.delete_member(ids["Dana (analyst)"], db_file)
+    overview = analysis.team_overview(db_file)
+    assert calls == []
+    assert len(overview["members"]) == len(ids) - 1
+
+
+def by_name_dominant(overview, name):
+    return {m["name"]: m["dominant_behavior"] for m in overview["members"]}[name]
+
+
+def test_days_window_limits_the_analysis(db_file):
+    member_id, _ = db.create_invite("A", db_file)
+    now = datetime.now().replace(microsecond=0)
+    old = _rows((now - timedelta(days=10)).strftime("%Y-%m-%d %H:%M:%S"), 10, ["A", "B"])
+    recent = _rows((now - timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S"), 10, ["A", "B"])
+    db.insert_observations(member_id, old + recent, db_file)
+
+    everything = analysis.team_overview(db_file, days=None)
+    last_day = analysis.team_overview(db_file, days=1)
+
+    assert everything["days"] == "all"
+    assert last_day["days"] == 1
+    assert everything["team"]["observations"] == len(old) + len(recent)
+    assert last_day["team"]["observations"] == len(recent)
+    assert last_day["data_as_of"] == everything["data_as_of"] == recent[-1]["timestamp"]
+
+    since = analysis.analysis_since(1)
+    df = analysis.get_team(db_file, days=1)["processed"][member_id]
+    assert df["timestamp"].min() >= pd.Timestamp(since)
+
+    detail = analysis.member_detail(member_id, db_file, days=1)
+    assert detail["summary"]["observations"] == len(recent)
+    assert detail["data_as_of"] == recent[-1]["timestamp"]
+
+
+def _spy_on_rebuilds(monkeypatch):
+    calls = []
+    real = analysis.process_member_observations
+
+    def spy(raw):
+        calls.append(len(raw))
+        return real(raw)
+
+    monkeypatch.setattr(analysis, "process_member_observations", spy)
+    return calls
+
+
+def test_window_start_moves_once_an_hour():
+    now = datetime(2026, 10, 15, 14, 37, 12)
+
+    assert analysis.analysis_since(1, now) == "2026-10-14 14:00:00"
+    assert analysis.analysis_since(7, now) == "2026-10-08 14:00:00"
+    assert analysis.analysis_since(None, now) is None
+    assert analysis.analysis_since(1, now + timedelta(minutes=20)) == "2026-10-14 14:00:00"
+
+
+def test_polls_do_not_rebuild_members_with_data_at_the_window_edge(db_file, monkeypatch):
+    # Someone who was working exactly a day ago: with a window that
+    # starts `days` ago to the second, a row slid out on every poll
+    # and every poll rebuilt them.
+    t0 = datetime.now().replace(minute=10, second=0, microsecond=0)
+    edge = t0 - timedelta(days=1)
+    member_id, _ = db.create_invite("Edge", db_file)
+    db.insert_observations(member_id, _rows(
+        (edge - timedelta(minutes=30)).strftime("%Y-%m-%d %H:%M:%S"), 60, ["A", "B"]
+    ), db_file)
+
+    clock = [t0]
+    monkeypatch.setattr(analysis, "_local_now", lambda: clock[0])
+    calls = _spy_on_rebuilds(monkeypatch)
+
+    analysis.team_overview(db_file, days=1)
+    assert len(calls) == 1
+
+    for seconds in (6, 12, 45 * 60):
+        clock[0] = t0 + timedelta(seconds=seconds)
+        calls.clear()
+        analysis.team_overview(db_file, days=1)
+        analysis.member_detail(member_id, db_file, days=1)
+        assert calls == [], f"rebuilt {seconds} s later"
+
+    # The next hour the window moves on once: one rebuild, then cached.
+    clock[0] = t0 + timedelta(hours=1)
+    calls.clear()
+    analysis.team_overview(db_file, days=1)
+    analysis.member_detail(member_id, db_file, days=1)
+    assert len(calls) == 1
+
+
+# --------------------------------------------------
+# Real and demo (simulated) cohorts
+# --------------------------------------------------
+
+def _add_real_member(db_file, name, profile_name, seed, days=2):
+    """
+    A member who joined through a normal (not simulated) invite.
+    """
+
+    _, code = db.create_invite(name, db_file)
+    member_id, _, _ = db.redeem_invite(
+        code, TEAM_CONSENT_VERSION, TEAM_SHARED_FIELDS, db_file
+    )
+    db.insert_observations(member_id, simulate.generate_member_rows(
+        simulate.PROFILES[profile_name], days=days, seed=seed
+    ), db_file)
+    return member_id
+
+
+def _real_view(overview):
+    """
+    Everything the overview says about real members and the team.
+    """
+
+    return {
+        "team": {k: v for k, v in overview["team"].items() if k != "demo_members"},
+        "behavior_groups": overview["behavior_groups"],
+        "behavior_groups_cohort": overview["behavior_groups_cohort"],
+        "members": {
+            m["name"]: (m["comparison"], m["behavior_mix"], m["dominant_behavior"],
+                        m["summary"])
+            for m in overview["members"] if not m["simulated"]
+        },
+    }
+
+
+def test_demo_members_do_not_change_real_members_analysis(db_file):
+    real = {
+        "Real A": _add_real_member(db_file, "Real A", "Asha (focused dev)", seed=11),
+        "Real B": _add_real_member(db_file, "Real B", "Chen (analyst)", seed=12),
+        "Real C": _add_real_member(db_file, "Real C", "Dana (analyst)", seed=13),
+    }
+    before = analysis.team_overview(db_file)
+    detail_before = analysis.member_detail(real["Real A"], db_file)
+
+    assert before["team"]["real_members"] == 3
+    assert before["team"]["demo_members"] == 0
+    assert before["behavior_groups"], "the real cohort has enough sessions to group"
+    assert before["behavior_groups_cohort"] == "real"
+
+    _simulated_team(db_file)  # five simulated members, including a context switcher
+    after = analysis.team_overview(db_file)
+    detail_after = analysis.member_detail(real["Real A"], db_file)
+
+    assert after["team"]["demo_members"] == len(simulate.PROFILES)
+    assert len(after["members"]) == 3 + len(simulate.PROFILES)
+    assert _real_view(after) == _real_view(before)
+    assert detail_after["comparison"] == detail_before["comparison"]
+    assert detail_after["behavior_mix"] == detail_before["behavior_mix"]
+    assert [s["behavior_group"] for s in detail_after["sessions"]] == [
+        s["behavior_group"] for s in detail_before["sessions"]
+    ]
+
+    # Demo members are compared and grouped among themselves.
+    by_name = {m["name"]: m for m in after["members"]}
+    assert by_name["Eli (context switcher)"]["comparison"]["status"] == "differs"
+    assert set(by_name["Eli (context switcher)"]["behavior_mix"]) <= SWITCHING_LABELS
+
+
+def test_real_member_is_not_called_unusual_because_of_a_demo_member(db_file):
+    real_id = _add_real_member(db_file, "Real Rita", "Asha (focused dev)", seed=9, days=3)
+    simulate.add_simulated_member(
+        "Eli (context switcher)", simulate.PROFILES["Eli (context switcher)"],
+        days=3, seed=4, db_file=db_file,
+    )
+
+    overview = analysis.team_overview(db_file)
+    rita = {m["id"]: m for m in overview["members"]}[real_id]
+
+    # No other real member to compare with: not "differs".
+    assert rita["comparison"]["status"] == "insufficient_data"
+    assert analysis.member_detail(real_id, db_file)["comparison"]["status"] == (
+        "insufficient_data"
+    )
+    assert overview["team"]["members"] == 1
+    assert overview["team"]["sharing"] == 1
+    assert overview["team"]["differs_count"] == 0
+    assert overview["team"]["sessions"] == rita["summary"]["sessions"]
+    assert overview["team"]["observations"] == rita["summary"]["observations"]
+    assert (overview["team"]["real_members"], overview["team"]["demo_members"]) == (1, 1)
+
+
+def test_demo_only_team_counts_demo_members(db_file):
+    ids = _simulated_team(db_file)
+    overview = analysis.team_overview(db_file)
+
+    assert overview["team"]["members"] == len(ids)
+    assert overview["team"]["real_members"] == 0
+    assert overview["team"]["demo_members"] == len(ids)
+    assert overview["behavior_groups_cohort"] == "demo"
+    assert overview["behavior_groups"]
+
+
+def test_groups_come_from_real_members_once_they_have_sessions(db_file):
+    _simulated_team(db_file)
+
+    # A real member who has not shared anything yet: still the demo groups.
+    db.create_invite("Pending", db_file)
+    overview = analysis.team_overview(db_file)
+    assert overview["behavior_groups_cohort"] == "demo"
+    assert overview["team"]["members"] == 1
+    assert overview["team"]["sharing"] == 0
+
+    # One real member with a few sessions: too few to group, and the
+    # demo members' groups are not shown in their place.
+    _add_real_member(db_file, "Real A", "Asha (focused dev)", seed=11, days=1)
+    overview = analysis.team_overview(db_file)
+    assert overview["behavior_groups_cohort"] == "real"
+    assert overview["behavior_groups"] == []
+
+
+def test_live_rollup():
+    rows = [
+        {"timestamp": "2026-10-01 09:00:00", "application": "A", "activity_status": "Active"},
+        {"timestamp": "2026-10-01 09:00:05", "application": "A", "activity_status": "Active"},
+        {"timestamp": "2026-10-01 09:00:10", "application": "B", "activity_status": "Idle"},
+        # A long gap (laptop asleep) is not credited in full.
+        {"timestamp": "2026-10-01 09:05:00", "application": "A", "activity_status": "Active"},
+    ]
+
+    assert analysis.live_rollup(rows) == {
+        "active_seconds": 5.0 + analysis.MAX_OBSERVATION_GAP_SECONDS,
+        "idle_seconds": 5.0,
+        "switches": 2,
+        "distinct_apps": 2,
+    }
+    assert analysis.live_rollup([]) == {
+        "active_seconds": 0.0, "idle_seconds": 0.0, "switches": 0, "distinct_apps": 0,
+    }
+
+
 def test_online_status_from_last_seen():
     now = datetime.now().astimezone()
     member = {"token_hash": "x"}
@@ -191,6 +481,22 @@ def test_online_status_from_last_seen():
     assert analysis.member_status(
         {**member, "last_seen": (now - timedelta(hours=1)).isoformat()}, now
     ) == "offline"
+
+
+def test_expired_invite_status():
+    now = datetime.now().astimezone()
+
+    assert analysis.member_status(
+        {"invite_expires": (now + timedelta(hours=1)).isoformat()}, now
+    ) == "invited"
+    assert analysis.member_status(
+        {"invite_expires": (now - timedelta(hours=1)).isoformat()}, now
+    ) == "expired"
+    # Joined members are never "expired", whatever the old expiry.
+    assert analysis.member_status(
+        {"token_hash": "x", "invite_expires": (now - timedelta(days=9)).isoformat()},
+        now,
+    ) == "joined"
 
 
 # --------------------------------------------------

@@ -7,6 +7,7 @@ env/
 __pycache__/
 *.py[cod]
 *.pyo
+.pytest_cache/
 
 # Environment / secrets
 .env
@@ -20,16 +21,60 @@ build/
 # IDE
 .vscode/
 .idea/
+.trae/
 
 # OS files
 .DS_Store
 Thumbs.db
 
-# Project-generated data
-data/raw/*.csv
-data/processed/*.csv
-data/focus/*.csv
-data/team/
+# Project-generated data: everything under data/ is personal or
+# generated (raw and processed activity, pipeline status, Focus
+# Assistant logs and heartbeat, the team database and admin key,
+# demo data in data/demo and data/team/demo.db, the launcher's lock
+# file). Only the small synthetic sample in data/sample is tracked.
+/data/*
+!/data/sample/
+
+# The same kinds of files outside data/. Relative WORKSPACE_DATA_DIR
+# and WORKSPACE_TEAM_DB values are taken from the project root, so e.g.
+# WORKSPACE_TEAM_DB=demo.db or `team.simulate --db team.db` creates a
+# database of members' window titles right here.
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+**/raw/workspace_activity*.csv
+**/processed/workspace_activity_processed*.csv
+**/processed/status.json
+**/processed/behavior_model.json
+**/focus/focus_sessions*.csv
+**/focus/focus_events*.csv
+**/focus/live.json
+.start_project.pid
+# A member's token and settings (WORKSPACE_TEAM_HOME), the live demo's
+# member tokens (WORKSPACE_TEAM_DEMO_STATE) and the team admin key.
+team.json
+live_demo.json
+admin_key
+
+# Untracked copies kept locally (owner decision, not deleted):
+# an old snapshot of the repository and the legacy top-level
+# frontend. The real dashboard lives in
+# frontend/Multimodal-Workspace-Analytics/frontend.
+/repo/
+/frontend/src/
+/frontend/public/
+/frontend/package.json
+/frontend/index.html
+/frontend/vite.config.js
+/frontend/README.md
+/frontend/.oxlintrc.json
+/frontend/.gitignore
 
 # Logs
 *.log

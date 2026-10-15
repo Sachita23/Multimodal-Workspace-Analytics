@@ -1,28 +1,42 @@
 import { useState } from "react";
 import { KeyRound } from "lucide-react";
 
-import { setAdminKey } from "../data/team";
+import { getAdminKey, setAdminKey } from "../data/team";
 
 
+// onSaved may return a promise (the request that checks the key);
+// the button stays disabled until it settles.
 function AdminKeyForm({ rejected, onSaved }) {
   const [value, setValue] = useState("");
+  const [checking, setChecking] = useState(false);
 
-  function submit(event) {
+  async function submit(event) {
     event.preventDefault();
 
-    if (!value.trim()) {
+    if (!value.trim() || checking) {
       return;
     }
 
     setAdminKey(value.trim());
-    onSaved();
+    setChecking(true);
+
+    try {
+      await onSaved();
+    } finally {
+      setChecking(false);
+
+      // A rejected key has been forgotten: start the field empty again.
+      if (!getAdminKey()) {
+        setValue("");
+      }
+    }
   }
 
   return (
     <form className="settings-panel admin-key-panel" onSubmit={submit}>
       <div className="settings-panel-heading">
         <h2><KeyRound size={15} /> Team admin key</h2>
-        <p>
+        <p role={rejected ? "alert" : undefined}>
           {rejected
             ? "That key was not accepted. Paste the key printed by the API server."
             : "Team data is only shown to the main user. Paste the admin key printed when the API server starts."}
@@ -40,8 +54,13 @@ function AdminKeyForm({ rejected, onSaved }) {
         />
       </label>
 
-      <button type="submit" className="settings-save-button team-key-button">
-        Unlock team analytics
+      <button
+        type="submit"
+        className="settings-save-button team-key-button"
+        disabled={checking || !value.trim()}
+        aria-busy={checking}
+      >
+        {checking ? "Checking key..." : "Unlock team analytics"}
       </button>
     </form>
   );

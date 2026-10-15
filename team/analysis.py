@@ -9,14 +9,20 @@ Cross-user ML then works on the pooled session-level features:
     differs from team  each member's typical session compared
                        with everyone else's, with the features
                        driving the difference
+
+Real and simulated (demo) members form separate cohorts for both,
+so demo members never change what is said about real people.
 """
 
+import hashlib
 import threading
-from datetime import datetime, timezone
+from collections import OrderedDict
+from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import pandas as pd
 
+import config
 from config import TEAM_ONLINE_SECONDS
 from etl.session_processor import (
     clean_data,
@@ -31,16 +37,37 @@ from etl.session_processor import (
 from ml.anomaly_detection import ANOMALY_DISTANCE, robust_scale
 from ml.clustering import (
     MODEL_FEATURES,
-    _assign_behavior_label,
     _kmeans,
     _standardize,
+    # The single-user pipeline's labeller (rank plus behaviour
+    # floors), so one person's sessions get the same names on the
+    # dashboard and the Team page. Clusters that share a label
+    # (several mostly-idle ones) are merged into one group below.
+    assign_labels,
 )
 from team import db
 
 
+# Only the most recent days of observations are analysed, which
+# bounds rebuild time and memory. None means all of them.
+ANALYSIS_DAYS = getattr(config, "TEAM_ANALYSIS_DAYS", 30)
+
+CLUSTER_COUNT = getattr(config, "DEFAULT_CLUSTER_COUNT", 4)
+
+# Samples further apart than this (laptop asleep, collector
+# stopped) are not credited as active or idle time.
+MAX_OBSERVATION_GAP_SECONDS = getattr(config, "MAX_OBSERVATION_GAP_SECONDS", 15)
+
+# The live view summarises this much time before each member's
+# newest observation.
+LIVE_WINDOW_SECONDS = 600
+
+TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+
 # Sessions shorter than this say little about behaviour and are
 # left out of the cross-user models (they still count in totals).
-MIN_SESSION_SECONDS = 120
+MIN_SESSION_SECONDS = getattr(config, "MIN_SESSION_SECONDS", 120)
 
 MIN_SESSIONS_FOR_GROUPS = 8
 
@@ -60,6 +87,18 @@ COMPARISON_FEATURES = {
     "unique_app_count": "Apps used per session",
     "duration_minutes": "Session length (min)",
 }
+
+# Real members and simulated (demo) members are analysed as two
+# separate cohorts: groups are fitted per cohort and a member is
+# only compared with others of the same cohort, so demo members
+# never change what the Team page says about real people.
+COHORT_REAL = "real"
+COHORT_DEMO = "demo"
+COHORTS = (COHORT_REAL, COHORT_DEMO)
+
+
+def cohort_of(simulated):
+    return COHORT_DEMO if simulated else COHORT_REAL
 
 
 # --------------------------------------------------
@@ -207,39 +246,63 @@ def summarize_member(df, sessions):
 # Cross-user ML
 # --------------------------------------------------
 
+def _cohorts(pooled):
+    """
+    Each pooled session's cohort (all real when the frame has no
+    cohort column).
+    """
+
+    if "cohort" in pooled:
+        return pooled["cohort"]
+
+    return pd.Series(COHORT_REAL, index=pooled.index, dtype=object)
+
+
 def assign_behavior_groups(pooled):
     """
-    K-Means over every member's qualifying sessions.
+    K-Means over the qualifying sessions of each cohort (real and
+    demo members) separately.
 
-    Adds behavior_group to `pooled` and returns group summaries.
-    Returns [] when there are too few sessions to group.
+    Adds behavior_group to `pooled` and returns
+    {cohort: group summaries}; a cohort with too few sessions to
+    group gets [].
     """
 
     pooled["behavior_group"] = None
+    cohorts = _cohorts(pooled)
 
-    if len(pooled) < MIN_SESSIONS_FOR_GROUPS:
+    return {
+        cohort: _fit_behavior_groups(pooled, (cohorts == cohort).to_numpy())
+        for cohort in COHORTS
+    }
+
+
+def _fit_behavior_groups(pooled, mask):
+    """
+    Group the sessions of `pooled` selected by `mask`, writing
+    their behavior_group. Returns the group summaries.
+    """
+
+    if int(mask.sum()) < MIN_SESSIONS_FOR_GROUPS:
         return []
 
     values = (
-        pooled[MODEL_FEATURES]
+        pooled.loc[mask, MODEL_FEATURES]
         .apply(pd.to_numeric, errors="coerce")
         .fillna(0)
         .to_numpy(dtype=float)
     )
 
     scaled, mean, std = _standardize(values)
-    labels, centroids = _kmeans(scaled, min(4, len(values)))
+    labels, centroids = _kmeans(scaled, min(CLUSTER_COUNT, len(values)))
 
-    names = {
-        cluster_id: _assign_behavior_label(center, mean, std)
-        for cluster_id, center in enumerate(centroids)
-    }
+    names = dict(enumerate(assign_labels(centroids, mean, std)))
 
-    pooled["behavior_group"] = [names[int(label)] for label in labels]
+    pooled.loc[mask, "behavior_group"] = [names[int(label)] for label in labels]
 
     groups = []
 
-    for name, members in pooled.groupby("behavior_group"):
+    for name, members in pooled[mask].groupby("behavior_group"):
         groups.append({
             "label": name,
             "sessions": int(len(members)),
@@ -279,12 +342,20 @@ def _robust_spread(values):
 
 def compare_with_team(member_id, pooled):
     """
-    Compare a member's typical (median) session with everyone
-    else's sessions, feature by feature.
+    Compare a member's typical (median) session with the sessions
+    of everyone else in the same cohort (real members with real
+    members, demo members with demo members), feature by feature.
     """
 
-    mine = pooled[pooled["member_id"] == member_id]
-    others = pooled[pooled["member_id"] != member_id]
+    is_mine = (pooled["member_id"] == member_id).to_numpy()
+    mine = pooled[is_mine]
+    peers = pooled
+
+    if is_mine.any():
+        cohorts = _cohorts(pooled).to_numpy()
+        peers = pooled[cohorts == cohorts[is_mine][0]]
+
+    others = peers[peers["member_id"] != member_id]
 
     if (
         len(mine) < MIN_MEMBER_SESSIONS
@@ -349,13 +420,22 @@ def behavior_mix(member_id, pooled):
 # --------------------------------------------------
 
 def member_status(member, now=None):
+    now = now or datetime.now(timezone.utc)
+
     if not member.get("token_hash"):
+        expires = member.get("invite_expires")
+
+        try:
+            if expires and datetime.fromisoformat(expires) < now:
+                return "expired"
+        except (TypeError, ValueError):
+            pass
+
         return "invited"
 
     if not member.get("last_seen"):
         return "joined"
 
-    now = now or datetime.now(timezone.utc)
     last_seen = datetime.fromisoformat(member["last_seen"])
 
     if (now - last_seen).total_seconds() <= TEAM_ONLINE_SECONDS:
@@ -373,6 +453,7 @@ def public_member(member):
         "id": member["id"],
         "name": member["name"],
         "status": member_status(member),
+        "simulated": bool(member.get("simulated")),
         "invite_expires": member.get("invite_expires"),
         "joined_at": member.get("joined_at"),
         "consent_at": member.get("consent_at"),
@@ -384,127 +465,369 @@ def public_member(member):
 
 
 # --------------------------------------------------
-# Team build (cached on data version)
+# Analysis window
 # --------------------------------------------------
 
-_cache = {}
-_cache_lock = threading.Lock()
+def normalize_days(days):
+    """
+    A positive whole number of days, or None for all data.
+    """
+
+    if days is None or days == "all":
+        return None
+
+    days = int(days)
+
+    if days <= 0:
+        raise ValueError("days must be positive")
+
+    return days
 
 
-def _build_team(db_file):
-    members = db.list_members(db_file)
+def _local_now():
+    return datetime.now()
 
-    processed = {}
-    member_sessions = {}
 
-    for member in members:
-        df = process_member_observations(
-            db.load_observations(member["id"], db_file)
-        )
-        processed[member["id"]] = df
-        sessions = build_sessions(df)
-        if not sessions.empty:
-            sessions.insert(0, "member_id", member["id"])
-        member_sessions[member["id"]] = sessions
+def analysis_since(days, now=None):
+    """
+    The oldest local timestamp included for a window of `days`
+    (member timestamps are local clock strings), or None.
 
-    frames = [_qualifying(s) for s in member_sessions.values() if not s.empty]
-    pooled = (
-        pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(
-            columns=["member_id", "duration_seconds", *MODEL_FEATURES,
-                     *COMPARISON_FEATURES]
-        )
+    The start is rounded down to the whole hour, so a window
+    covers `days` plus up to an hour and moves once an hour. A
+    start that moved every second would drop a row out of the
+    window on every poll for anyone who was working `days` ago at
+    this time of day, changing their data version and forcing a
+    full rebuild of every such member on each request.
+    """
+
+    if days is None:
+        return None
+
+    now = now or _local_now()
+    start = (now - timedelta(days=days)).replace(
+        minute=0, second=0, microsecond=0
     )
 
-    groups = assign_behavior_groups(pooled)
+    return start.strftime(TIMESTAMP_FORMAT)
+
+
+def _utc_now_iso():
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+# --------------------------------------------------
+# Team build (cached per member)
+# --------------------------------------------------
+
+# One state per database file, most recently used last:
+#   members  (member_id, days) -> per-member entry
+#   teams    days -> pooled sessions and behaviour groups
+_cache = OrderedDict()
+_cache_lock = threading.Lock()
+
+# Per-key build guards, so building one member never blocks
+# readers of another member (or of a different window).
+_build_locks = {}
+
+MAX_CACHED_DATABASES = 4
+
+
+def _db_state(db_file):
+    key = str(db_file)
+
+    state = _cache.get(key)
+
+    if state is None:
+        state = _cache[key] = {"members": {}, "teams": {}}
+
+        while len(_cache) > MAX_CACHED_DATABASES:
+            old_key, _ = _cache.popitem(last=False)
+            for lock_key in [k for k in _build_locks if k[0] == old_key]:
+                del _build_locks[lock_key]
+
+    _cache.move_to_end(key)
+
+    return key, state
+
+
+def _build_member(member_id, db_file, since, version):
+    df = process_member_observations(
+        db.load_observations(member_id, db_file, since=since)
+    )
+    sessions = build_sessions(df)
+
+    if not sessions.empty:
+        sessions.insert(0, "member_id", member_id)
 
     return {
-        "processed": processed,
-        "sessions": member_sessions,
-        "pooled": pooled,
-        "groups": groups,
+        "version": version,
+        "processed": df,
+        "sessions": sessions,
+        "summary": summarize_member(df, sessions),
     }
 
 
-def get_team(db_file=None):
-    key = (str(db_file), db.data_version(db_file))
+def _member_entry(member_id, db_file, days, since):
+    """
+    One member's processed frame, sessions and summary, rebuilt
+    only when that member's own data (within the window) changes.
+    """
+
+    version = db.member_data_version(member_id, db_file, since)
+    cache_key = (member_id, days)
 
     with _cache_lock:
-        if key not in _cache:
-            _cache.clear()
-            _cache[key] = _build_team(db_file)
+        db_key, state = _db_state(db_file)
+        cached = state["members"].get(cache_key)
 
-        return _cache[key]
+        if cached is not None and cached["version"] == version:
+            return cached
+
+        guard = _build_locks.setdefault((db_key, cache_key), threading.Lock())
+
+    with guard:
+        # Another request may have built it while we waited.
+        with _cache_lock:
+            cached = state["members"].get(cache_key)
+
+        if cached is not None and cached["version"] == version:
+            return cached
+
+        entry = _build_member(member_id, db_file, since, version)
+
+        with _cache_lock:
+            state["members"][cache_key] = entry
+
+    return entry
 
 
-def team_overview(db_file=None):
-    team = get_team(db_file)
+def _pool_sessions(member_sessions, simulated):
+    """
+    Every member's qualifying sessions in one frame, each tagged
+    with its member's cohort.
+    """
+
+    frames = []
+
+    for member_id, sessions in member_sessions.items():
+        qualifying = _qualifying(sessions)
+
+        if not qualifying.empty:
+            frames.append(qualifying.assign(
+                cohort=cohort_of(simulated.get(member_id))
+            ))
+
+    if frames:
+        return pd.concat(frames, ignore_index=True)
+
+    return pd.DataFrame(
+        columns=["member_id", "session_id", "cohort", "duration_seconds",
+                 *MODEL_FEATURES, *COMPARISON_FEATURES]
+    )
+
+
+def get_team(db_file=None, days=ANALYSIS_DAYS, member_ids=None, simulated=None):
+    """
+    Processed data for every member in the window plus the
+    cross-user models (fitted per cohort). Only members whose
+    data changed are reprocessed; pooling and grouping are redone
+    whenever any member changed.
+
+    `simulated` maps member id -> simulated flag; it is read from
+    the database when not given.
+    """
+
+    days = normalize_days(days)
+    since = analysis_since(days)
+
+    if member_ids is None or simulated is None:
+        flags = db.member_cohorts(db_file)
+
+        if member_ids is None:
+            member_ids = list(flags)
+
+        if simulated is None:
+            simulated = flags
+
+    simulated = {
+        member_id: bool(simulated.get(member_id)) for member_id in member_ids
+    }
+
+    entries = {
+        member_id: _member_entry(member_id, db_file, days, since)
+        for member_id in member_ids
+    }
+    versions = tuple(sorted(
+        (member_id, simulated[member_id], entries[member_id]["version"])
+        for member_id in member_ids
+    ))
+
+    with _cache_lock:
+        db_key, state = _db_state(db_file)
+
+        # Forget members that were removed.
+        current = set(member_ids)
+        for key in [k for k in state["members"] if k[0] not in current]:
+            del state["members"][key]
+            _build_locks.pop((db_key, key), None)
+
+        cached = state["teams"].get(days)
+        if cached is not None and cached["versions"] == versions:
+            return cached
+
+    member_sessions = {
+        member_id: entry["sessions"] for member_id, entry in entries.items()
+    }
+    pooled = _pool_sessions(member_sessions, simulated)
+    groups = assign_behavior_groups(pooled)
+
+    newest = [
+        entry["version"][2] for entry in entries.values() if entry["version"][2]
+    ]
+
+    team = {
+        "versions": versions,
+        "days": days,
+        "since": since,
+        "data_as_of": max(newest) if newest else None,
+        "simulated": simulated,
+        "processed": {
+            member_id: entry["processed"] for member_id, entry in entries.items()
+        },
+        "sessions": member_sessions,
+        "summaries": {
+            member_id: entry["summary"] for member_id, entry in entries.items()
+        },
+        "data_as_of_by_member": {
+            member_id: entry["version"][2] for member_id, entry in entries.items()
+        },
+        "pooled": pooled,
+        # {cohort: group summaries}
+        "groups": groups,
+    }
+
+    with _cache_lock:
+        state["teams"][days] = team
+
+    return team
+
+
+def _team_totals(rows):
+    """
+    The team block's counts over the given member rows.
+    """
+
+    statuses = [row["status"] for row in rows]
+    summaries = [row["summary"] for row in rows]
+
+    active = sum(summary["active_seconds"] for summary in summaries)
+    idle = sum(summary["idle_seconds"] for summary in summaries)
+    tracked = active + idle
+
+    return {
+        "members": len(rows),
+        "joined": sum(s not in ("invited", "expired") for s in statuses),
+        "sharing": sum(summary["observations"] > 0 for summary in summaries),
+        "online": statuses.count("online"),
+        "active_seconds": round(active, 1),
+        "idle_seconds": round(idle, 1),
+        "focus_score": round(active / tracked * 100, 1)
+        if tracked > 0 else None,
+        "sessions": sum(summary["sessions"] for summary in summaries),
+        "observations": sum(summary["observations"] for summary in summaries),
+        "differs_count": sum(
+            row["comparison"]["status"] == "differs" for row in rows
+        ),
+    }
+
+
+def team_overview(db_file=None, days=ANALYSIS_DAYS):
+    """
+    Every member with their summary, behaviour mix and comparison,
+    plus team totals and behaviour groups.
+
+    Whenever the team has at least one real member, the totals
+    count real members only and demo (simulated) members are
+    reported separately in team.demo_members. The behaviour groups
+    are the real members' once any of them has sessions, otherwise
+    the demo members'; behavior_groups_cohort says which.
+    """
+
     members = db.list_members(db_file)
+    team = get_team(
+        db_file,
+        days,
+        member_ids=[m["id"] for m in members],
+        simulated={m["id"]: bool(m.get("simulated")) for m in members},
+    )
     pooled = team["pooled"]
 
     rows = []
-    totals = {"active": 0.0, "idle": 0.0, "sessions": 0, "observations": 0}
 
     for member in members:
-        df = team["processed"].get(member["id"], pd.DataFrame())
-        sessions = team["sessions"].get(member["id"], pd.DataFrame())
-        summary = summarize_member(df, sessions)
-
-        totals["active"] += summary["active_seconds"]
-        totals["idle"] += summary["idle_seconds"]
-        totals["sessions"] += summary["sessions"]
-        totals["observations"] += summary["observations"]
+        summary = team["summaries"].get(member["id"]) or summarize_member(
+            pd.DataFrame(), pd.DataFrame()
+        )
 
         mix = behavior_mix(member["id"], pooled)
 
         rows.append({
             **public_member(member),
-            "summary": summary,
+            "summary": dict(summary),
             "behavior_mix": mix,
             "dominant_behavior": max(mix, key=mix.get) if mix else None,
             "comparison": compare_with_team(member["id"], pooled),
         })
 
-    statuses = [row["status"] for row in rows]
-    tracked = totals["active"] + totals["idle"]
+    real_rows = [row for row in rows if not row["simulated"]]
+    demo_rows = [row for row in rows if row["simulated"]]
+
+    def has_sessions(cohort_rows):
+        return any(row["summary"]["sessions"] > 0 for row in cohort_rows)
+
+    groups_cohort = (
+        COHORT_DEMO
+        if not has_sessions(real_rows) and has_sessions(demo_rows)
+        else COHORT_REAL
+    )
 
     return {
-        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "generated_at": _utc_now_iso(),
+        "data_as_of": team["data_as_of"],
+        "days": "all" if team["days"] is None else team["days"],
         "team": {
-            "members": len(rows),
-            "joined": sum(s != "invited" for s in statuses),
-            "online": statuses.count("online"),
-            "active_seconds": round(totals["active"], 1),
-            "idle_seconds": round(totals["idle"], 1),
-            "focus_score": round(totals["active"] / tracked * 100, 1)
-            if tracked > 0 else None,
-            "sessions": totals["sessions"],
-            "observations": totals["observations"],
-            "differs_count": sum(
-                row["comparison"]["status"] == "differs" for row in rows
-            ),
+            **_team_totals(real_rows or rows),
+            "real_members": len(real_rows),
+            "demo_members": len(demo_rows),
         },
-        "behavior_groups": team["groups"],
+        "behavior_groups": team["groups"][groups_cohort],
+        "behavior_groups_cohort": groups_cohort,
         "members": rows,
     }
 
 
-def member_detail(member_id, db_file=None):
-    member = next(
-        (m for m in db.list_members(db_file) if m["id"] == member_id), None
-    )
+def member_detail(member_id, db_file=None, days=ANALYSIS_DAYS):
+    member = db.member_with_stats(member_id, db_file)
 
     if member is None:
         return None
 
-    team = get_team(db_file)
+    team = get_team(db_file, days)
     df = team["processed"].get(member_id, pd.DataFrame())
     sessions = team["sessions"].get(member_id, pd.DataFrame())
     pooled = team["pooled"]
 
     detail = {
         **public_member(member),
+        "generated_at": _utc_now_iso(),
+        "data_as_of": team["data_as_of_by_member"].get(member_id),
+        "days": "all" if team["days"] is None else team["days"],
         "consent_fields": member.get("consent_fields"),
-        "summary": summarize_member(df, sessions),
+        "summary": dict(
+            team["summaries"].get(member_id)
+            or summarize_member(df, sessions)
+        ),
         "behavior_mix": behavior_mix(member_id, pooled),
         "comparison": compare_with_team(member_id, pooled),
         "hourly_activity": [],
@@ -585,3 +908,104 @@ def member_detail(member_id, db_file=None):
     ]
 
     return detail
+
+
+# --------------------------------------------------
+# Live view (SQL only, no ETL)
+# --------------------------------------------------
+
+def live_signature(db_file=None):
+    """
+    The members (without stats) and a tag that changes whenever
+    the /live response would: a new observation, a member added
+    or removed, or a status change such as going offline.
+    """
+
+    members, newest_id = db.live_members(db_file)
+
+    state = [newest_id] + [
+        (
+            member["id"],
+            member["name"],
+            member_status(member),
+            member["last_seen"],
+            bool(member["simulated"]),
+        )
+        for member in members
+    ]
+
+    tag = hashlib.sha1(repr(state).encode("utf-8")).hexdigest()
+
+    return members, tag
+
+
+def live_rollup(rows):
+    """
+    Active and idle time, app switches and distinct apps over
+    observations given oldest first. Each sample is credited
+    with the time since the previous one, as in the ETL.
+    """
+
+    active = idle = 0.0
+    switches = 0
+    apps = set()
+    previous = None
+
+    for row in rows:
+        timestamp = datetime.strptime(row["timestamp"], TIMESTAMP_FORMAT)
+        apps.add(row["application"])
+
+        if previous is not None:
+            seconds = (timestamp - previous[0]).total_seconds()
+            seconds = min(max(seconds, 0.0), MAX_OBSERVATION_GAP_SECONDS)
+
+            if row["activity_status"] == "Active":
+                active += seconds
+            elif row["activity_status"] == "Idle":
+                idle += seconds
+
+            if row["application"] != previous[1]:
+                switches += 1
+
+        previous = (timestamp, row["application"])
+
+    return {
+        "active_seconds": round(active, 1),
+        "idle_seconds": round(idle, 1),
+        "switches": switches,
+        "distinct_apps": len(apps),
+    }
+
+
+def team_live(db_file=None, members=None):
+    """
+    What every member is doing right now. `current` is only
+    filled in for members who are online; the 10-minute rollup
+    is measured back from each member's own newest observation.
+    """
+
+    if members is None:
+        members, _ = db.live_members(db_file)
+
+    latest = db.latest_observations(db_file, LIVE_WINDOW_SECONDS)
+    rows = []
+
+    for member in members:
+        status = member_status(member)
+        newest, window = latest.get(member["id"], (None, []))
+
+        rows.append({
+            "id": member["id"],
+            "name": member["name"],
+            "status": status,
+            "simulated": bool(member["simulated"]),
+            "last_seen": member["last_seen"],
+            "current": dict(newest) if newest and status == "online" else None,
+            "last_10_min": live_rollup(window),
+        })
+
+    return {
+        "generated_at": _utc_now_iso(),
+        "online_window_seconds": TEAM_ONLINE_SECONDS,
+        "members": rows,
+    }

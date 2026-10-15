@@ -1,9 +1,10 @@
-import csv
+import logging
 import sys
 import time
+import urllib.error
+import urllib.request
 import webbrowser
 from pathlib import Path
-from datetime import datetime
 import tkinter as tk
 from tkinter import messagebox, simpledialog
 
@@ -11,8 +12,21 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from collector.collector import get_active_application
-from focus.focus_manager import FocusManager, FOCUS_SESSIONS_FILE, FOCUS_EVENTS_FILE
+import config
+from collector.collector import get_active_application, get_idle_time
+try:
+    # (application, window_title, pid): lets the assistant recognise its
+    # own windows by process id instead of by title.
+    from collector.collector import get_active_process
+except ImportError:
+    get_active_process = None
+from focus import analytics
+from focus.focus_manager import FocusManager, InstanceLock
+
+LOGGER = logging.getLogger(__name__)
+
+DASHBOARD_URL = str(getattr(config, "DASHBOARD_URL", "http://localhost:5173")).rstrip("/")
+SNOOZE_SECONDS = 5 * 60
 
 # -----------------------------------------------------------------------------
 # Desktop theme: inspired by the supplied mobile references, but redesigned
@@ -97,8 +111,12 @@ class TimerWindow(tk.Toplevel):
         self.status_label = tk.Label(self, text="Waiting to start", bg=BG,
                                      fg=SECONDARY, font=(FONT, 9))
         self.status_label.pack()
-        self.progress = tk.Frame(self, bg=BLUE, height=4)
-        self.progress.pack(fill="x", padx=20, pady=(14, 0))
+        # The track is packed full width; the bar inside it is placed with a
+        # relative width, so it actually shrinks as time runs out.
+        track = tk.Frame(self, bg=CARD_ALT, height=4)
+        track.pack(fill="x", padx=20, pady=(14, 0))
+        self.progress = tk.Frame(track, bg=BLUE)
+        self.progress.place(x=0, y=0, relheight=1, relwidth=1)
 
     def show(self, session_title="Focus session"):
         self.title_label.configure(text=session_title[:32])
@@ -112,31 +130,35 @@ class TimerWindow(tk.Toplevel):
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
         self.geometry(f"+{sw - self.winfo_width() - 28}+36")
 
-    def update_timer(self, remaining, total, active=True):
+    def update_timer(self, remaining, total, active=True, status=None, color=None):
         remaining = max(0, int(remaining))
         minutes, seconds = divmod(remaining, 60)
         self.timer_label.configure(text=f"{minutes:02d}:{seconds:02d}")
         self.status_label.configure(
-            text="Focus session active" if active else "Session ended",
-            fg=SUCCESS if active else SECONDARY,
+            text=status or ("Focus session active" if active else "Session ended"),
+            fg=color or (SUCCESS if active else SECONDARY),
         )
         ratio = 0 if total <= 0 else max(0, min(1, remaining / total))
-        self.progress.configure(width=max(1, int(225 * ratio)))
+        self.progress.place_configure(relwidth=ratio)
 
     def hide(self):
         self.withdraw()
 
 
 class DeviationPopup(tk.Toplevel):
-    """Persistent non-modal overlay. It stays until the user returns to zone."""
-    def __init__(self, master):
+    """Persistent non-modal overlay. It stays until the user returns to the
+    zone, allows the application for this session, or snoozes it."""
+    def __init__(self, master, on_allow=None, on_snooze=None):
         super().__init__(master)
         self.withdraw()
         self.title("Focus Deviation")
         self.overrideredirect(True)
         self.attributes("-topmost", True)
         self.configure(bg=DANGER)
-        self.geometry("390x205")
+        self.geometry("390x260")
+        self.application = None
+        self.on_allow = on_allow
+        self.on_snooze = on_snooze
 
         outer = tk.Frame(self, bg=DANGER)
         outer.pack(fill="both", expand=True, padx=2, pady=2)
@@ -156,11 +178,26 @@ class DeviationPopup(tk.Toplevel):
                              font=(FONT, 8), justify="left", anchor="w",
                              wraplength=340)
         self.goal.pack(fill="x", padx=20, pady=(10, 0))
-        tk.Label(inner, text="This reminder will remain until you return to your focus zone.",
+        tk.Label(inner, text="This reminder stays until you return to your focus zone.",
                  bg="#11151C", fg=BLUE_BRIGHT, font=(FONT, 8, "bold"),
-                 wraplength=340, justify="left").pack(anchor="w", padx=20, pady=(10, 14))
+                 wraplength=340, justify="left").pack(anchor="w", padx=20, pady=(10, 8))
+        actions = tk.Frame(inner, bg="#11151C")
+        actions.pack(anchor="w", padx=20, pady=(0, 14))
+        RoundedButton(actions, "Allow for this session", self._allow,
+                      width=170, primary=True, bg="#11151C").pack(side="left")
+        RoundedButton(actions, "Snooze 5 min", self._snooze,
+                      width=120, bg="#11151C").pack(side="left", padx=(8, 0))
+
+    def _allow(self):
+        if self.on_allow:
+            self.on_allow(self.application)
+
+    def _snooze(self):
+        if self.on_snooze:
+            self.on_snooze()
 
     def show_deviation(self, application, window_title, goal, allowed_apps):
+        self.application = application
         self.current.configure(text=application or "Unknown application")
         detail = "Switch back to one of your selected applications."
         if window_title and window_title != "Unknown":
@@ -182,22 +219,35 @@ class DeviationPopup(tk.Toplevel):
 
 
 class FocusAssistant(tk.Tk):
-    def __init__(self):
+    def __init__(self, data_dir=None):
         super().__init__()
         self.title("Focus Assistant")
         self.geometry("1180x780")
         self.minsize(1000, 700)
         self.configure(bg=BG)
 
-        self.manager = FocusManager()
+        self.manager = FocusManager(data_dir)
         self.timer_window = TimerWindow(self)
-        self.deviation_popup = DeviationPopup(self)
+        self.deviation_popup = DeviationPopup(
+            self, on_allow=self._allow_application, on_snooze=self._snooze_deviation
+        )
 
         self.current_tab = "focus"
         self.previous_app = None
         self.session_total_seconds = 0
         self.completion_prompt_open = False
         self.session_ended_message = ""
+        self.snooze_until = 0.0
+        self._last_monitor_error = None
+
+        # Widgets of the focus tab are destroyed whenever another tab is
+        # shown; their state lives here and is re-applied when it is rebuilt.
+        self.live_dot = None
+        self.live_dot_color = MUTED
+        self.app_checkbuttons = []
+        self.add_app_label = None
+        self.dashboard_hint = None
+        self.live_state = {"current_app": None, "allowed": None, "status": "No active session"}
 
         self.title_var = tk.StringVar()
         self.goal_var = tk.StringVar()
@@ -254,7 +304,7 @@ class FocusAssistant(tk.Tk):
         bottom.pack(side="bottom", fill="x", padx=24, pady=24)
         tk.Label(bottom, text="CURRENT MONITOR", bg=SIDEBAR, fg=SECONDARY,
                  font=(FONT, 8, "bold")).pack(anchor="w")
-        tk.Label(bottom, text="Application-level first. Browser context comes next.",
+        tk.Label(bottom, text="Watches the application in front while a session runs. Idle time is not counted.",
                  bg=SIDEBAR, fg=MUTED, font=(FONT, 7), wraplength=185,
                  justify="left").pack(anchor="w", pady=(5, 0))
 
@@ -288,6 +338,23 @@ class FocusAssistant(tk.Tk):
             self._build_dashboard_tab()
 
     # --------------------------------------------------------------- helpers
+    @staticmethod
+    def _safe_configure(widget, **kwargs):
+        """Configure a widget only if it still exists (tabs destroy theirs)."""
+        if widget is None:
+            return False
+        try:
+            if not widget.winfo_exists():
+                return False
+            widget.configure(**kwargs)
+        except tk.TclError:
+            return False
+        return True
+
+    def _set_live_dot(self, color):
+        self.live_dot_color = color
+        self._safe_configure(self.live_dot, fg=color)
+
     def _header(self, eyebrow, title, subtitle):
         head = tk.Frame(self.content, bg=BG)
         head.pack(fill="x", padx=42, pady=(34, 22))
@@ -374,7 +441,7 @@ class FocusAssistant(tk.Tk):
         state.pack_configure(padx=0, pady=0)
         tk.Label(state, text="Live session", bg=CARD, fg=SECONDARY,
                  font=(FONT, 8, "bold")).pack(anchor="w", padx=20, pady=(18, 8))
-        self.live_dot = tk.Label(state, text="●", bg=CARD, fg=MUTED, font=(FONT, 16))
+        self.live_dot = tk.Label(state, text="●", bg=CARD, fg=self.live_dot_color, font=(FONT, 16))
         self.live_dot.pack(anchor="w", padx=20)
         tk.Label(state, textvariable=self.current_app_var, bg=CARD, fg=TEXT,
                  font=(FONT, 12, "bold"), wraplength=270, justify="left").pack(anchor="w", padx=20, pady=(5, 2))
@@ -402,13 +469,16 @@ class FocusAssistant(tk.Tk):
         box.pack(fill="x", padx=22, pady=(0, 16))
         tk.Label(box, text="Applications allowed in this session", bg=CARD,
                  fg=SECONDARY, font=(FONT, 8, "bold")).pack(anchor="w")
-        tk.Label(box, text="Select each application individually. Browser/tab intelligence will be added after app-level monitoring is stable.",
+        tk.Label(box, text="Select each application individually. The zone is fixed while a session runs; "
+                           "use 'Allow for this session' on the deviation reminder to add one.",
                  bg=CARD, fg=MUTED, font=(FONT, 7), wraplength=650,
                  justify="left").pack(anchor="w", pady=(3, 8))
 
         chips = tk.Frame(box, bg=CARD)
         chips.pack(fill="x")
         apps = list(dict.fromkeys(COMMON_APPS + self.custom_apps))
+        running = self.manager.running
+        self.app_checkbuttons = []
         for app in apps:
             if app not in self.selected_apps:
                 self.selected_apps[app] = tk.BooleanVar(value=False)
@@ -417,21 +487,33 @@ class FocusAssistant(tk.Tk):
                 command=self._refresh_zone_preview, bg=CARD_ALT, fg=SECONDARY,
                 selectcolor=BLUE_DARK, activebackground=CARD_ALT,
                 activeforeground=TEXT, relief="flat", bd=0, padx=8, pady=5,
-                font=(FONT, 8), cursor="hand2"
+                font=(FONT, 8), cursor="hand2",
+                state="disabled" if running else "normal",
             )
             cb.pack(side="left", padx=(0, 6), pady=(0, 6))
+            self.app_checkbuttons.append(cb)
 
         add = tk.Label(box, text="＋ Add another application", bg=CARD,
-                       fg=BLUE_BRIGHT, cursor="hand2", font=(FONT, 8, "bold"))
+                       fg=MUTED if running else BLUE_BRIGHT, cursor="hand2",
+                       font=(FONT, 8, "bold"))
         add.pack(anchor="w", pady=(2, 0))
         add.bind("<Button-1>", lambda _e: self._add_custom_app())
+        self.add_app_label = add
 
     def _refresh_zone_preview(self):
-        if not hasattr(self, "zone_list"):
+        zone_list = getattr(self, "zone_list", None)
+        try:
+            if zone_list is None or not zone_list.winfo_exists():
+                return
+        except tk.TclError:
             return
-        for child in self.zone_list.winfo_children():
+        for child in zone_list.winfo_children():
             child.destroy()
-        selected = [app for app, var in self.selected_apps.items() if var.get()]
+        # While a session runs, show the zone it actually enforces.
+        if self.manager.running:
+            selected = list(self.manager.allowed_apps)
+        else:
+            selected = [app for app, var in self.selected_apps.items() if var.get()]
         if not selected:
             tk.Label(self.zone_list, text="No applications selected yet.", bg=CARD,
                      fg=MUTED, font=(FONT, 8)).pack(anchor="w")
@@ -444,6 +526,8 @@ class FocusAssistant(tk.Tk):
                      font=(FONT, 8)).pack(side="left", padx=(7, 0))
 
     def _add_custom_app(self):
+        if self.manager.running:
+            return
         dialog = tk.Toplevel(self)
         dialog.title("Add application")
         dialog.geometry("390x175")
@@ -498,13 +582,15 @@ class FocusAssistant(tk.Tk):
         self.session_total_seconds = duration * 60
         self.previous_app = None
         self.completion_prompt_open = False
+        self.snooze_until = 0.0
         self.current_status_var.set("Session active — monitoring your declared focus zone")
-        self.live_dot.configure(fg=SUCCESS)
+        self._set_live_dot(SUCCESS)
         self.timer_window.show(self.manager.title)
         self.timer_window.update_timer(self.session_total_seconds, self.session_total_seconds, True)
         self.deviation_popup.hide_deviation()
         self._update_session_buttons()
-        self._monitor_once()
+        self._refresh_zone_preview()
+        self._run_monitor_tick()
 
     def stop_focus(self, completed=False):
         if not self.manager.running:
@@ -517,27 +603,40 @@ class FocusAssistant(tk.Tk):
     def _finish_visual_state(self, message):
         self.timer_window.hide()
         self.deviation_popup.hide_deviation()
+        self.snooze_until = 0.0
         self.current_status_var.set(message)
-        self.live_dot.configure(fg=SUCCESS if "completed" in message.lower() else MUTED)
+        self._set_live_dot(SUCCESS if "completed" in message.lower() else MUTED)
+        self._set_live_state(None, None, "No active session")
         self._update_session_buttons()
+        self._refresh_zone_preview()
 
     def _update_session_buttons(self):
         running = self.manager.running
-        if hasattr(self, "start_button"):
-            self.start_button.label.configure(bg=MUTED if running else BLUE,
-                                              fg="#D9DEE7" if running else WHITE)
-        if hasattr(self, "stop_button"):
-            self.stop_button.label.configure(bg=BLUE_DARK if running else CARD_ALT,
-                                             fg=TEXT if running else MUTED)
+        start_button = getattr(self, "start_button", None)
+        stop_button = getattr(self, "stop_button", None)
+        if start_button is not None:
+            self._safe_configure(start_button.label, bg=MUTED if running else BLUE,
+                                 fg="#D9DEE7" if running else WHITE)
+        if stop_button is not None:
+            self._safe_configure(stop_button.label, bg=BLUE_DARK if running else CARD_ALT,
+                                 fg=TEXT if running else MUTED)
+        # The focus zone is fixed while a session runs.
+        for checkbutton in self.app_checkbuttons:
+            self._safe_configure(checkbutton, state="disabled" if running else "normal")
+        self._safe_configure(self.add_app_label, fg=MUTED if running else BLUE_BRIGHT)
 
     def _handle_timer_completion(self):
         if self.completion_prompt_open or not self.manager.running:
             return
         self.completion_prompt_open = True
+        due_at = self.manager.expected_end_at
+        # Time spent answering the prompt is neither focus nor deviation.
+        self.manager.mark_due()
         self.timer_window.hide()
         self.deviation_popup.hide_deviation()
         self.current_status_var.set("Planned focus time reached — choose what to do next")
-        self.live_dot.configure(fg=BLUE_BRIGHT)
+        self._set_live_dot(BLUE_BRIGHT)
+        self._set_live_state(None, None, "Planned focus time reached")
 
         continue_session = messagebox.askyesno(
             "Focus time completed",
@@ -555,73 +654,169 @@ class FocusAssistant(tk.Tk):
             )
             if extra:
                 try:
-                    self.manager.extend_session(extra)
-                    self.session_total_seconds = extra * 60
+                    remaining = self.manager.extend_session(extra)
+                    self.session_total_seconds = max(extra * 60, remaining)
                     self.timer_window.show(self.manager.title)
-                    self.timer_window.update_timer(self.session_total_seconds,
-                                                  self.session_total_seconds, True)
+                    self.timer_window.update_timer(remaining, self.session_total_seconds, True)
                     self.current_status_var.set(f"Focus extended by {extra} minutes")
-                    self.live_dot.configure(fg=SUCCESS)
+                    self._set_live_dot(SUCCESS)
                     self.completion_prompt_open = False
-                    self._monitor_once()
+                    self._run_monitor_tick()
                     return
                 except (ValueError, RuntimeError) as error:
                     messagebox.showerror("Unable to continue", str(error), parent=self)
 
         self.completion_prompt_open = False
-        self.manager.stop_session("Completed")
+        # The session ended when the planned time ran out, not when the
+        # prompt was answered.
+        self.manager.stop_session("Completed", ended_at=due_at)
         self._finish_visual_state("Session completed")
         self._show_tab("focus")
 
+    def _allow_application(self, application):
+        """'Allow for this session' on the deviation reminder."""
+        if not application or not self.manager.running:
+            return
+        self.manager.allow_application(application)
+        self.deviation_popup.hide_deviation()
+        self.current_status_var.set(f"{application} is now part of this session's focus zone")
+        self._set_live_dot(SUCCESS)
+        self._refresh_zone_preview()
+
+    def _snooze_deviation(self):
+        """'Snooze 5 min': hide the reminder; the deviation is still recorded."""
+        self.snooze_until = time.monotonic() + SNOOZE_SECONDS
+        self.deviation_popup.hide_deviation()
+        self.current_status_var.set("Reminder snoozed for 5 minutes — deviation time is still recorded")
+
     # --------------------------------------------------------------- monitor
     def _monitor_loop(self):
-        self._monitor_once()
-        self.after(1000, self._monitor_loop)
+        # Re-arm first, so an error in one tick can never stop monitoring and
+        # ticks (and the heartbeat) keep running while a modal prompt is open.
+        try:
+            self.after(1000, self._monitor_loop)
+        except tk.TclError:
+            return
+        self._run_monitor_tick()
+
+    def _run_monitor_tick(self):
+        try:
+            self._monitor_once()
+        except Exception as error:
+            # Log each distinct error once instead of every second.
+            message = f"{type(error).__name__}: {error}"
+            if message != self._last_monitor_error:
+                self._last_monitor_error = message
+                LOGGER.exception("Focus monitor tick failed")
+        finally:
+            self._write_heartbeat()
+
+    def _write_heartbeat(self):
+        try:
+            self.manager.write_heartbeat(
+                current_app=self.live_state["current_app"],
+                allowed=self.live_state["allowed"],
+                status=self.live_state["status"],
+            )
+        except Exception:
+            pass
+
+    def _set_live_state(self, current_app, allowed, status):
+        self.live_state = {"current_app": current_app, "allowed": allowed, "status": status}
+
+    @staticmethod
+    def _active_window():
+        """(application, window_title, pid); pid is None when unavailable."""
+        try:
+            if get_active_process is not None:
+                application, window_title, pid = get_active_process()
+                return application, window_title, pid
+            application, window_title = get_active_application()
+            return application, window_title, None
+        except Exception:
+            return "Unknown", "Unknown", None
+
+    @staticmethod
+    def _idle_seconds():
+        try:
+            return float(get_idle_time() or 0.0)
+        except Exception:
+            return 0.0
 
     def _monitor_once(self):
-        try:
-            application, window_title = get_active_application()
-        except Exception:
-            application, window_title = "Unknown", "Unknown"
-
-        # Our own timer/deviation windows can become the foreground window on
-        # some Windows configurations. Never let those helper windows create
-        # or clear a user deviation. The next poll will inspect the real app
-        # again after the user changes focus.
-        internal_title = (window_title or "").strip().lower()
-        if internal_title in {"focus deviation", "focus timer"} and self.manager.running:
-            remaining = self.manager.remaining_seconds()
-            if not self.completion_prompt_open:
-                self.timer_window.update_timer(remaining, self.session_total_seconds, True)
-            return
-
         if not self.manager.running:
             if self.current_tab == "focus":
                 self.current_app_var.set("No active session")
                 self.current_status_var.set("Start a session to begin monitoring")
+            self._set_live_state(None, None, "No active session")
             return
 
         if self.completion_prompt_open:
             return
 
+        # After a sleep, log the time asleep as idle before anything else
+        # (including the completion prompt for a planned end that passed
+        # meanwhile) is recorded.
+        self.manager.record_tick_gap()
+
         if self.manager.is_due():
             self._handle_timer_completion()
             return
 
-        result = self.manager.evaluate_application(application, window_title)
+        application, window_title, pid = self._active_window()
+        result = self.manager.evaluate_application(
+            application, window_title, pid=pid, idle_seconds=self._idle_seconds()
+        )
+        state = result["state"]
+        remaining = self.manager.remaining_seconds()
+        total = self.session_total_seconds
+
+        if state == "self":
+            # One of our own windows (main window, timer, the reminder that
+            # is being clicked): it neither creates nor clears a deviation.
+            self._set_live_state("Focus Assistant", None, "Focus Assistant")
+            self.timer_window.update_timer(remaining, total, True)
+            return
+
+        if state == "unknown":
+            # The active window could not be identified: no event, no popup.
+            self._set_live_state(None, None, "Active window unknown")
+            self.timer_window.update_timer(remaining, total, True)
+            return
+
         self.current_app_var.set(application)
 
-        if result["allowed"]:
-            self.current_status_var.set("Within your declared focus zone")
-            self.live_dot.configure(fg=SUCCESS)
+        if state == "idle":
+            self.current_status_var.set("Paused (idle) — time away is not counted")
+            self._set_live_dot(WARNING)
             self.deviation_popup.hide_deviation()
+            self._set_live_state(application, None, "Paused (idle)")
+            self.timer_window.update_timer(remaining, total, True,
+                                           status="Paused (idle)", color=WARNING)
+        elif state == "neutral":
+            # System windows (task switcher, desktop, Spotlight): not counted
+            # and they leave the reminder as it is.
+            self.current_status_var.set("System window — not counted")
+            self._set_live_state(application, None, "Neutral")
+            self.timer_window.update_timer(remaining, total, True)
+        elif result["allowed"]:
+            self.current_status_var.set("Within your declared focus zone")
+            self._set_live_dot(SUCCESS)
+            self.deviation_popup.hide_deviation()
+            self._set_live_state(application, True, result["status"])
+            self.timer_window.update_timer(remaining, total, True)
         else:
-            self.current_status_var.set("Deviation detected — return to your focus zone")
-            self.live_dot.configure(fg=DANGER)
-            self._show_persistent_deviation(application, window_title)
+            self._set_live_dot(DANGER)
+            self._set_live_state(application, False, result["status"])
+            if time.monotonic() < self.snooze_until:
+                self.current_status_var.set("Deviation detected — reminder snoozed")
+            else:
+                self.current_status_var.set("Deviation detected — return to your focus zone")
+                self._show_persistent_deviation(application, window_title)
+            self.timer_window.update_timer(remaining, total, True)
 
-        remaining = self.manager.remaining_seconds()
-        self.timer_window.update_timer(remaining, self.session_total_seconds, True)
+        if self.manager.last_write_error:
+            self.current_status_var.set(self.manager.last_write_error)
         self.previous_app = application
 
     def _show_persistent_deviation(self, application, window_title):
@@ -630,147 +825,18 @@ class FocusAssistant(tk.Tk):
         )
 
     # --------------------------------------------------------------- data
-    def _read_csv(self, path):
-        if not path.exists():
-            return []
-        try:
-            with open(path, "r", newline="", encoding="utf-8") as file:
-                return list(csv.DictReader(file))
-        except (OSError, csv.Error):
-            return []
-
     def _session_records(self):
-        rows = self._read_csv(FOCUS_SESSIONS_FILE)
-        starts, ends, latest = {}, {}, {}
-        for row in rows:
-            sid = row.get("session_id", "")
-            if not sid:
-                continue
-            latest[sid] = row
-            if row.get("event_type") == "START":
-                starts[sid] = row
-            elif row.get("event_type") == "END":
-                ends[sid] = row
-
-        events = self._read_csv(FOCUS_EVENTS_FILE)
-        grouped = {}
-        for event in events:
-            sid = event.get("focus_session_id", "")
-            if sid:
-                grouped.setdefault(sid, []).append(event)
-        for sid in grouped:
-            grouped[sid].sort(key=lambda r: self._parse_dt(r.get("timestamp")) or datetime.min)
-
-        records = []
-        for sid, start in starts.items():
-            start_dt = self._parse_dt(start.get("timestamp"))
-            end_row = ends.get(sid)
-            end_dt = self._parse_dt(end_row.get("timestamp")) if end_row else None
-            latest_row = latest.get(sid, start)
-            planned = self._safe_int(latest_row.get("planned_duration_minutes"),
-                                     self._safe_int(start.get("planned_duration_minutes"), 0))
-            actual_seconds = int((end_dt - start_dt).total_seconds()) if start_dt and end_dt else 0
-            status = end_row.get("completion_status", "In progress") if end_row else "In progress"
-
-            deviation_seconds = 0
-            deviation_count = 0
-            switch_count = 0
-            allowed_seconds = 0
-            app_seconds = {}
-            event_rows = grouped.get(sid, [])
-            for i, event in enumerate(event_rows):
-                t0 = self._parse_dt(event.get("timestamp"))
-                if not t0:
-                    continue
-                if i + 1 < len(event_rows):
-                    t1 = self._parse_dt(event_rows[i + 1].get("timestamp"))
-                else:
-                    t1 = end_dt
-                duration = max(0, int((t1 - t0).total_seconds())) if t1 and t1 > t0 else 0
-                app = event.get("application", "Unknown") or "Unknown"
-                app_seconds[app] = app_seconds.get(app, 0) + duration
-                allowed = str(event.get("allowed", "")).lower() == "true"
-                if allowed:
-                    allowed_seconds += duration
-                else:
-                    deviation_count += 1
-                    deviation_seconds += duration
-
-                if i > 0 and event.get("application") != event_rows[i - 1].get("application"):
-                    switch_count += 1
-
-            # If no event was logged in a tiny session, actual time is still useful.
-            if actual_seconds > 0 and not event_rows:
-                allowed_seconds = actual_seconds
-            adherence = (allowed_seconds / actual_seconds * 100) if actual_seconds else 0
-            longest_allowed = self._longest_allowed_run(event_rows, end_dt)
-            top_deviation_app = self._top_deviation_app(event_rows, end_dt)
-            records.append({
-                "id": sid,
-                "title": start.get("title") or start.get("goal") or "Untitled session",
-                "goal": start.get("goal", ""),
-                "apps": [a.strip() for a in start.get("allowed_apps", "").split("|") if a.strip()],
-                "start": start_dt, "end": end_dt,
-                "planned": planned,
-                "actual_seconds": max(0, actual_seconds),
-                "status": status,
-                "deviations": deviation_count,
-                "deviation_seconds": max(0, deviation_seconds),
-                "adherence": max(0, min(100, adherence)),
-                "switches": switch_count,
-                "longest_focus_seconds": longest_allowed,
-                "top_deviation_app": top_deviation_app,
-            })
-        records.sort(key=lambda r: r["start"] or datetime.min, reverse=True)
-        return records
-
-    def _longest_allowed_run(self, events, end_dt):
-        longest = 0
-        for i, event in enumerate(events):
-            if str(event.get("allowed", "")).lower() != "true":
-                continue
-            t0 = self._parse_dt(event.get("timestamp"))
-            t1 = self._parse_dt(events[i + 1].get("timestamp")) if i + 1 < len(events) else end_dt
-            if t0 and t1 and t1 > t0:
-                longest = max(longest, int((t1 - t0).total_seconds()))
-        return longest
-
-    def _top_deviation_app(self, events, end_dt):
-        totals = {}
-        for i, event in enumerate(events):
-            if str(event.get("allowed", "")).lower() == "true":
-                continue
-            t0 = self._parse_dt(event.get("timestamp"))
-            t1 = self._parse_dt(events[i + 1].get("timestamp")) if i + 1 < len(events) else end_dt
-            if t0 and t1 and t1 > t0:
-                app = event.get("application", "Unknown") or "Unknown"
-                totals[app] = totals.get(app, 0) + int((t1 - t0).total_seconds())
-        return max(totals, key=totals.get) if totals else "None"
-
-    @staticmethod
-    def _parse_dt(value):
-        try:
-            return datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
-        except (TypeError, ValueError):
-            return None
-
-    @staticmethod
-    def _safe_int(value, default=0):
-        try:
-            return int(float(value))
-        except (TypeError, ValueError):
-            return default
+        """All sessions, newest first (accounting lives in focus/analytics.py)."""
+        active = self.manager.session_id if self.manager.running else None
+        return analytics.session_records(self.manager.data_dir, active_session_id=active)
 
     @staticmethod
     def _fmt_seconds(seconds):
-        seconds = max(0, int(seconds))
-        h, rem = divmod(seconds, 3600)
-        m, s = divmod(rem, 60)
-        if h:
-            return f"{h}h {m}m"
-        if m:
-            return f"{m}m {s}s"
-        return f"{s}s"
+        return analytics.fmt_seconds(seconds)
+
+    @staticmethod
+    def _fmt_pct(value):
+        return "—" if value is None else f"{value:.0f}%"
 
     # --------------------------------------------------------------- history
     def _build_history_tab(self):
@@ -812,7 +878,11 @@ class FocusAssistant(tk.Tk):
                  font=(FONT, 11, "bold"), anchor="w").pack(anchor="w")
         date_text = record["start"].strftime("%d %b %Y  •  %I:%M %p") if record["start"] else "Unknown time"
         tk.Label(info, text=date_text, bg=CARD, fg=MUTED, font=(FONT, 8)).pack(anchor="w", pady=(3, 0))
-        status_color = SUCCESS if record["status"] == "Completed" else WARNING if record["status"] == "In progress" else SECONDARY
+        status_color = {
+            analytics.STATUS_COMPLETED: SUCCESS,
+            analytics.STATUS_IN_PROGRESS: WARNING,
+            analytics.STATUS_INTERRUPTED: DANGER,
+        }.get(record["status"], SECONDARY)
         tk.Label(top, text=record["status"], bg=CARD_ALT, fg=status_color,
                  font=(FONT, 8, "bold"), padx=10, pady=5).pack(side="right")
         arrow = tk.Label(top, text="›", bg=CARD, fg=MUTED, font=(FONT, 16))
@@ -822,7 +892,7 @@ class FocusAssistant(tk.Tk):
         summary.pack(fill="x", padx=18, pady=(0, 14))
         self._metric_inline(summary, "Planned", f"{record['planned']} min")
         self._metric_inline(summary, "Actual", self._fmt_seconds(record["actual_seconds"]))
-        self._metric_inline(summary, "Zone adherence", f"{record['adherence']:.0f}%")
+        self._metric_inline(summary, "Zone adherence", self._fmt_pct(record["adherence"]))
         self._metric_inline(summary, "Deviations", str(record["deviations"]))
         self._metric_inline(summary, "App switches", str(record["switches"]))
 
@@ -834,7 +904,7 @@ class FocusAssistant(tk.Tk):
             ("Declared focus zone", "  •  ".join(record["apps"]) or "None recorded"),
             ("Time outside zone", self._fmt_seconds(record["deviation_seconds"])),
             ("Longest uninterrupted focus period", self._fmt_seconds(record["longest_focus_seconds"])),
-            ("Most time outside zone", record["top_deviation_app"]),
+            ("Most time outside zone", record["top_deviation_app"] or "None"),
             ("Interpretation", self._session_interpretation(record)),
         ]
         for label, value in details:
@@ -863,7 +933,7 @@ class FocusAssistant(tk.Tk):
         tk.Label(block, text=value, bg=CARD, fg=TEXT, font=(FONT, 9, "bold")).pack(anchor="w", pady=(2, 0))
 
     def _session_interpretation(self, r):
-        if not r["actual_seconds"]:
+        if not r["actual_seconds"] or r["adherence"] is None:
             return "There is not enough timing data to interpret this session yet."
         if r["adherence"] >= 90:
             return "Most of the recorded session stayed inside the focus zone you declared."
@@ -906,13 +976,20 @@ class FocusAssistant(tk.Tk):
         # Calculate analytics
         # ---------------------------------------------------------
 
+        summary = analytics.summarize(records)
         total = len(records)
-        completed = sum(r["status"] == "Completed" for r in records)
-        actual = sum(r["actual_seconds"] for r in records)
+        finished = sum(not r["running"] for r in records)
+        completed = summary["completed"]
+        # Focus time is in-zone time; session time is wall-clock time in
+        # sessions (it includes idle, system-window and deviation time).
+        in_zone = summary["focus_seconds_total"]
+        actual = summary["session_seconds_total"]
         planned = sum(r["planned"] * 60 for r in records)
-        deviations = sum(r["deviations"] for r in records)
+        deviations = summary["deviation_count"]
         outside = sum(r["deviation_seconds"] for r in records)
-        adherence = sum(r["adherence"] for r in records) / total
+        # Time-weighted over finished sessions; idle and system-window time
+        # count as neither focus nor deviation.
+        adherence = summary["adherence_pct"]
         avg_session = actual / total if total else 0
         avg_deviation = outside / deviations if deviations else 0
         longest = max(
@@ -924,18 +1001,19 @@ class FocusAssistant(tk.Tk):
         metrics = [
             (
                 "Focus time",
-                self._fmt_seconds(actual),
-                f"{self._fmt_seconds(planned)} planned across all sessions"
+                self._fmt_seconds(in_zone),
+                f"in your focus zone, of {self._fmt_seconds(actual)} in sessions "
+                f"({self._fmt_seconds(planned)} planned)"
             ),
             (
                 "Zone adherence",
-                f"{adherence:.0f}%",
-                "share of recorded time inside your declared zone"
+                self._fmt_pct(adherence),
+                "share of active session time inside your declared zone"
             ),
             (
                 "Completion rate",
-                f"{completed / total * 100:.0f}%",
-                f"{completed} of {total} sessions completed"
+                self._fmt_pct(completed / finished * 100 if finished else None),
+                f"{completed} of {finished} finished sessions completed"
             ),
             (
                 "Avg. session",
@@ -1120,9 +1198,10 @@ class FocusAssistant(tk.Tk):
             padx=20
         )
 
+        # Records are newest first: chart the latest eight sessions.
         self._bar_chart(
             left,
-            records[-8:],
+            analytics.recent_records(records, 8),
             "adherence",
             100,
             "%"
@@ -1156,7 +1235,7 @@ class FocusAssistant(tk.Tk):
 
         self._deviation_chart(
             right,
-            records
+            summary["deviation_sources"]
         )
 
         # =========================================================
@@ -1232,10 +1311,16 @@ class FocusAssistant(tk.Tk):
             row_h = max(25, (h - 30) / max(1, len(records)))
             for i, r in enumerate(records):
                 y = top + i * row_h
-                value = float(r.get(field, 0))
+                raw = r.get(field)
                 label = r["title"][:20]
                 canvas.create_text(0 + 2, y + 10, text=label, fill=SECONDARY,
                                    font=(FONT, 8), anchor="w")
+                if raw is None:
+                    # Nothing measurable yet (e.g. only idle or system windows).
+                    canvas.create_text(left, y + 10, text="no data", fill=MUTED,
+                                       font=(FONT, 8), anchor="w")
+                    continue
+                value = float(raw)
                 bar_w = max(2, (w - left - right) * min(1, value / maximum))
                 canvas.create_rectangle(left, y + 3, left + bar_w, y + 17,
                                         fill=BLUE, outline="")
@@ -1243,13 +1328,9 @@ class FocusAssistant(tk.Tk):
                                    fill=TEXT, font=(FONT, 8, "bold"), anchor="w")
         canvas.bind("<Configure>", draw)
 
-    def _deviation_chart(self, parent, records):
-        totals = {}
-        for r in records:
-            app = r["top_deviation_app"]
-            if app != "None":
-                totals[app] = totals.get(app, 0) + r["deviation_seconds"]
-        ranked = sorted(totals.items(), key=lambda x: x[1], reverse=True)[:7]
+    def _deviation_chart(self, parent, sources):
+        # Per-application time outside the zone, summed over all sessions.
+        ranked = [(s["app"], s["seconds"]) for s in sources][:7]
         canvas = tk.Canvas(parent, bg=CARD, highlightthickness=0, height=245)
         canvas.pack(fill="both", expand=True, padx=16, pady=12)
         def draw(_event=None):
@@ -1274,7 +1355,9 @@ class FocusAssistant(tk.Tk):
         canvas.bind("<Configure>", draw)
 
     def _overall_interpretation(self, records, adherence, outside, deviations):
-        if adherence >= 90:
+        if adherence is None:
+            first = "There is not enough finished, active session time yet to judge focus-zone adherence."
+        elif adherence >= 90:
             first = "Your recorded sessions are generally staying close to the focus zones you define."
         elif adherence >= 70:
             first = "Your sessions show a mix of sustained focus and interruptions outside the declared zone."
@@ -1288,32 +1371,51 @@ class FocusAssistant(tk.Tk):
 
     # ------------------------------------------------------------- dashboard
     def _build_dashboard_tab(self):
-        self._header("Workspace analytics", "See the bigger picture",
-                     "This tab is the bridge to the main multimodal workspace dashboard you are building separately.")
+        self._header("Workspace analytics", "Today at a glance",
+                     "Your focus sessions so far today. The web dashboard shows them next to your workspace activity.")
+        records = self._session_records()
+        today = analytics.today_summary(records)
         card = self._card(self.content, padx=42, pady=0)
-        tk.Label(card, text="Workspace Dashboard", bg=CARD, fg=TEXT,
+        tk.Label(card, text="Today", bg=CARD, fg=TEXT,
                  font=(FONT, 16, "bold")).pack(anchor="w", padx=24, pady=(24, 7))
-        tk.Label(card, text="Focus Assistant will eventually pass its session insights into the broader workspace analytics flow. The existing 29-column workspace schema remains unchanged.",
-                 bg=CARD, fg=SECONDARY, font=(FONT, 9), wraplength=820,
+        if today["sessions"]:
+            intro = ("Sessions that ran today. Focus time is time in your focus zone since midnight; "
+                     "adherence counts finished sessions only.")
+        else:
+            intro = "No focus session today yet. Start one from the Focus Session tab."
+        tk.Label(card, text=intro, bg=CARD, fg=SECONDARY, font=(FONT, 9), wraplength=820,
                  justify="left").pack(anchor="w", padx=24)
-        features = tk.Frame(card, bg=CARD)
-        features.pack(fill="x", padx=24, pady=20)
-        for title, desc in [
-            ("Workspace behavior", "Applications, sessions, switching and activity patterns."),
-            ("Behavior labels", "Connect focus behavior with the broader behavioral analytics pipeline."),
-            ("Trends & anomalies", "Explore longer-term changes beyond individual focus sessions."),
+        tiles = tk.Frame(card, bg=CARD)
+        tiles.pack(fill="x", padx=24, pady=20)
+        for title, value in [
+            ("Focus time", self._fmt_seconds(today["focus_seconds"])),
+            ("Sessions", str(today["sessions"])),
+            ("Zone adherence", self._fmt_pct(today["adherence_pct"])),
+            ("Deviations", str(today["deviations"])),
         ]:
-            f = tk.Frame(features, bg=CARD_ALT)
+            f = tk.Frame(tiles, bg=CARD_ALT)
             f.pack(side="left", fill="both", expand=True, padx=(0, 8))
-            tk.Label(f, text=title, bg=CARD_ALT, fg=TEXT,
-                     font=(FONT, 9, "bold")).pack(anchor="w", padx=14, pady=(14, 5))
-            tk.Label(f, text=desc, bg=CARD_ALT, fg=SECONDARY, font=(FONT, 7),
-                     wraplength=210, justify="left").pack(anchor="w", padx=14, pady=(0, 14))
-        RoundedButton(card, "Open Workspace Dashboard", self._open_dashboard,
-                      width=210, primary=True, bg=CARD).pack(anchor="w", padx=24, pady=(0, 24))
+            tk.Label(f, text=title.upper(), bg=CARD_ALT, fg=MUTED,
+                     font=(FONT, 7, "bold")).pack(anchor="w", padx=14, pady=(14, 5))
+            tk.Label(f, text=value, bg=CARD_ALT, fg=TEXT,
+                     font=(FONT, 16, "bold")).pack(anchor="w", padx=14, pady=(0, 14))
+        RoundedButton(card, "Open the Focus page in the dashboard", self._open_dashboard,
+                      width=260, primary=True, bg=CARD).pack(anchor="w", padx=24)
+        self.dashboard_hint = tk.Label(card, text=f"Opens {DASHBOARD_URL}/focus", bg=CARD,
+                                       fg=MUTED, font=(FONT, 8), wraplength=820, justify="left")
+        self.dashboard_hint.pack(anchor="w", padx=24, pady=(8, 24))
 
     def _open_dashboard(self):
-        webbrowser.open("http://localhost:5173")
+        url = f"{DASHBOARD_URL}/focus"
+        if dashboard_reachable(DASHBOARD_URL):
+            webbrowser.open(url)
+            self._safe_configure(self.dashboard_hint, text=f"Opened {url}", fg=MUTED)
+        else:
+            self._safe_configure(
+                self.dashboard_hint,
+                text=f"The dashboard is not running at {DASHBOARD_URL}. Start it with python start_project.py",
+                fg=WARNING,
+            )
 
     def _close(self):
         if self.manager.running:
@@ -1325,15 +1427,65 @@ class FocusAssistant(tk.Tk):
             if not answer:
                 return
             self.stop_focus(False)
+        # Tell the dashboard right away that no session is running.
+        self._set_live_state(None, None, "Focus Assistant closed")
+        self._write_heartbeat()
         self.timer_window.destroy()
         self.deviation_popup.destroy()
         self.destroy()
 
 
-def launch_focus_assistant():
-    app = FocusAssistant()
-    app.mainloop()
+def dashboard_reachable(url, timeout=1.0):
+    """True if something answers at `url` within `timeout` seconds."""
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            return response.status < 500
+    except urllib.error.HTTPError as error:
+        return error.code < 500
+    except (urllib.error.URLError, OSError, ValueError):
+        return False
+
+
+def already_running_message(pid=None):
+    who = f" (PID {pid})" if pid else ""
+    return (
+        f"Focus Assistant is already running{who}. Use its window, or close it "
+        "before starting another one: two assistants would record over each other."
+    )
+
+
+def _report_already_running(message):
+    print(message, file=sys.stderr)
+    # Started from a launcher or a shortcut there may be no terminal to
+    # read, so say it in a dialog too.
+    try:
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showinfo("Focus Assistant", message, parent=root)
+        root.destroy()
+    except Exception:
+        pass
+
+
+def launch_focus_assistant(data_dir=None):
+    """Run the assistant; returns the process exit code.
+
+    Only one assistant runs per data directory: a second launch says so
+    and returns 1 without opening a window.
+    """
+    lock = InstanceLock(data_dir)
+    if not lock.acquire():
+        _report_already_running(already_running_message(lock.holder_pid()))
+        return 1
+    if lock.error:
+        LOGGER.warning("%s; another Focus Assistant would not be detected.", lock.error)
+    try:
+        app = FocusAssistant(data_dir)
+        app.mainloop()
+    finally:
+        lock.release()
+    return 0
 
 
 if __name__ == "__main__":
-    launch_focus_assistant()
+    sys.exit(launch_focus_assistant())

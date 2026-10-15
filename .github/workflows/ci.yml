@@ -1,0 +1,112 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# bash everywhere (Git Bash on Windows). It runs with `set -e`, so every
+# line of a multi-line step counts; Windows' default pwsh only reports
+# the exit code of a step's last command.
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  python:
+    name: Python ${{ matrix.python }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.12", "3.14"]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Run tests
+        run: python -m pytest -q
+
+      - name: Scripts answer --help without starting
+        # A script that ignored --help would start serving or looping.
+        timeout-minutes: 2
+        run: |
+          python api/server.py --help
+          python run_pipeline.py --help
+          python live_pipeline.py --help
+          python start_project.py --help
+
+  collector:
+    # Team members install only requirements-collector.txt, on Windows,
+    # macOS or Linux with Python 3.9 or newer (the README promises the
+    # python3 that ships with macOS), so the member collector must
+    # import there without pandas, numpy or Flask. On Windows this is
+    # also the only job where pywin32 comes from requirements-collector.txt.
+    name: Member collector, Python ${{ matrix.python }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    # --help must never start collecting; if it did, stop the job.
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install collector dependencies only
+        run: python -m pip install -r requirements-collector.txt
+
+      - name: Import the collector and show its help
+        # Each line must pass; team_sync.py is checked on its own
+        # because collector.py never imports it.
+        shell: bash
+        run: |
+          python -c "import collector.collector, collector.team_sync"
+          python collector/team_sync.py --help
+          python collector/collector.py --help
+
+  frontend:
+    name: Dashboard (lint, test, build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend/Multimodal-Workspace-Analytics/frontend
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/Multimodal-Workspace-Analytics/frontend/package-lock.json
+
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
