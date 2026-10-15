@@ -1,0 +1,6 @@
+# Everything in requirements.txt plus the test runner.
+#   pip install -r requirements-dev.txt
+#   python -m pytest
+
+-r requirements.txt
+pytest==9.1.1
