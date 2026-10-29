@@ -9,7 +9,11 @@ created with the admin key, the member joins with recorded consent, and
 activity is uploaded over HTTP to /api/team/ingest. On first start each
 member gets a few days of history, then new samples are generated every
 few seconds in real time. Members take short breaks, so the Team page shows
-people going offline and coming back.
+people going offline and coming back. About every 40 minutes each member
+also runs a 25-minute focus session on their two main apps and shares it
+via /api/team/focus, wandering off to other apps as often as their profile
+suggests (Eli the context switcher often, Asha the focused dev rarely); new
+members also get one finished focus session per day of history.
 
 Demo members are named "Demo · ...", flagged as simulated (the Team page
 shows a Demo badge), and their tokens are kept in data/team/live_demo.json
@@ -26,6 +30,7 @@ import os
 import random
 import sys
 import time
+import uuid
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta
@@ -46,7 +51,8 @@ from config import (
     _env,
     _project_path,
 )
-from collector.team_sync import ServerError, request_json
+import config
+from collector.team_sync import ServerError, focus_session_score, request_json
 from team.api import MIN_ADMIN_KEY_LENGTH, _usable_key
 from team.simulate import PROFILES, WINDOW_TITLES, generate_member_rows
 
@@ -65,6 +71,40 @@ def _state_file():
 STATE_FILE = _state_file()
 NAME_PREFIX = "Demo · "
 TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+# Demo focus sessions: FOCUS_MINUTES long, the next one starting
+# FOCUS_GAP_MINUTES after the previous one ended (so one about every
+# 40 minutes), on each profile's FOCUS_APP_COUNT most used apps.
+FOCUS_MINUTES = 25
+FOCUS_GAP_MINUTES = (8, 22)
+# The first one starts soon after the demo does, so the Team page shows
+# live focus sessions within a few minutes.
+FOCUS_FIRST_MINUTES = (0.5, 8)
+FOCUS_APP_COUNT = 2
+# People switch less while focusing: dwell times in an allowed app are
+# this much longer, and a detour lasts about this long at most.
+FOCUS_DWELL_FACTOR = 3
+FOCUS_DEVIATION_DWELL_SECONDS = 90
+# Chance that an app switch during focus stays on an allowed app.
+FOCUS_DISCIPLINE = {
+    "Asha (focused dev)": 0.92,
+    "Ben (focused dev)": 0.9,
+    "Chen (analyst)": 0.85,
+    "Dana (analyst)": 0.88,
+    "Eli (context switcher)": 0.55,
+}
+DEFAULT_FOCUS_DISCIPLINE = 0.9
+# Idle this long ends a deviation episode (as in focus/analytics.py).
+FOCUS_IDLE_BREAK_SECONDS = getattr(config, "SESSION_IDLE_BREAK_SECONDS", 300)
+
+
+def _iso(value):
+    return value.isoformat(timespec="seconds")
+
+
+def focus_discipline(name):
+    name = name[len(NAME_PREFIX):] if name.startswith(NAME_PREFIX) else name
+    return FOCUS_DISCIPLINE.get(name, DEFAULT_FOCUS_DISCIPLINE)
 
 
 class AdminKeyError(Exception):
@@ -89,6 +129,17 @@ class DemoMember:
         self.rng = random.Random(seed)
         self.app_names, self.app_weights = zip(*self.apps.items())
 
+        # Focus sessions: the profile's main apps are on task.
+        ranked = sorted(self.apps, key=lambda app: -self.apps[app])
+        self.focus_apps = ranked[:FOCUS_APP_COUNT]
+        self.discipline = focus_discipline(name)
+        self.focus = None
+        self.next_focus = now + timedelta(
+            minutes=self.rng.uniform(*FOCUS_FIRST_MINUTES)
+        )
+        # {session_id: newest row} not yet uploaded.
+        self.focus_outbox = {}
+
         self.app = self._pick_app()
         self.next_switch = now + self._dwell()
         self.idle = 0.0
@@ -97,11 +148,162 @@ class DemoMember:
         self.working = True
         self.phase_end = now + timedelta(minutes=self.rng.uniform(8, 35))
 
+
     def _pick_app(self):
-        return self.rng.choices(self.app_names, self.app_weights)[0]
+        if self.focus is None:
+            return self.rng.choices(self.app_names, self.app_weights)[0]
+
+        on_task = self.rng.random() < self.discipline
+        pool = [
+            app for app in self.app_names
+            if (app in self.focus_apps) == on_task
+        ] or list(self.app_names)
+        return self.rng.choices(pool, [self.apps[app] for app in pool])[0]
 
     def _dwell(self):
-        return timedelta(seconds=self.rng.expovariate(1 / self.mean_dwell))
+        mean = self.mean_dwell
+
+        if self.focus is not None:
+            # On task people stay longer; off task they soon come back.
+            mean = (
+                mean * FOCUS_DWELL_FACTOR if self.app in self.focus_apps
+                else min(mean, FOCUS_DEVIATION_DWELL_SECONDS)
+            )
+
+        return timedelta(seconds=self.rng.expovariate(1 / mean))
+
+    # ---------------------------------------------- focus sessions
+    def start_focus(self, now):
+        """
+        Begin a FOCUS_MINUTES focus session on the main apps, and stay
+        at work until it ends.
+        """
+
+        end = now + timedelta(minutes=FOCUS_MINUTES)
+        self.focus = {
+            "session_id": str(uuid.uuid4()),
+            "title": "Deep work" if self.discipline >= 0.9 else "Catch-up block",
+            "goal": f"Work in {' and '.join(self.focus_apps)} only",
+            "planned_minutes": FOCUS_MINUTES,
+            "allowed_apps": list(self.focus_apps),
+            "started": now,
+            "end": end,
+            "deviations": 0,
+            "deviation_seconds": 0.0,
+            "allowed_seconds": 0.0,
+            "previous_state": None,
+            "idle_stretch": 0.0,
+            "current_app": None,
+            "current_allowed": None,
+        }
+
+        self.working = True
+        self.phase_end = max(self.phase_end, end + timedelta(minutes=2))
+        # Start the session on task.
+        if self.app not in self.focus_apps:
+            self.app = self.rng.choices(
+                self.focus_apps, [self.apps[app] for app in self.focus_apps]
+            )[0]
+        self.next_switch = now + self._dwell()
+
+    def _focus_step(self, row, interval):
+        """
+        Account one sample with the deviation-episode rule of
+        focus/analytics.py: one continuous excursion is one deviation,
+        and a long idle stretch ends it.
+        """
+
+        focus = self.focus
+
+        if row["activity_status"] == "Idle":
+            focus["idle_stretch"] += interval
+            if focus["idle_stretch"] >= FOCUS_IDLE_BREAK_SECONDS:
+                focus["previous_state"] = None
+            focus["current_allowed"] = None
+            focus["current_app"] = row["application"]
+            return
+
+        focus["idle_stretch"] = 0.0
+        allowed = row["application"] in focus["allowed_apps"]
+
+        if allowed:
+            focus["allowed_seconds"] += interval
+        else:
+            focus["deviation_seconds"] += interval
+            if focus["previous_state"] != "deviation":
+                focus["deviations"] += 1
+
+        focus["previous_state"] = "allowed" if allowed else "deviation"
+        focus["current_app"] = row["application"]
+        focus["current_allowed"] = allowed
+
+    def focus_row(self, now, finished=False):
+        """
+        The /api/team/focus "session" for the current focus session.
+        """
+
+        focus = self.focus
+        score = focus_session_score(
+            focus["deviations"], focus["deviation_seconds"]
+        )
+
+        return {
+            "session_id": focus["session_id"],
+            "title": focus["title"],
+            "goal": focus["goal"],
+            "planned_minutes": focus["planned_minutes"],
+            "allowed_apps": list(focus["allowed_apps"]),
+            "started_at": _iso(focus["started"]),
+            "ended_at": _iso(min(now, focus["end"])) if finished else None,
+            "status": "Completed" if finished else "running",
+            "deviations": focus["deviations"],
+            "deviation_seconds": round(focus["deviation_seconds"], 1),
+            "allowed_seconds": round(focus["allowed_seconds"], 1),
+            "score": max(0, min(100, int(score))),
+            "current_app": None if finished else focus["current_app"],
+            "current_allowed": None if finished else focus["current_allowed"],
+            "remaining_s": None if finished else max(
+                0, int((focus["end"] - now).total_seconds())
+            ),
+            "updated_at": _iso(now),
+        }
+
+    def _advance_focus(self, now, row, interval):
+        if self.focus is None:
+            if row is not None and now >= self.next_focus:
+                self.start_focus(now)
+            else:
+                return
+
+        if now >= self.focus["end"]:
+            final = self.focus_row(now, finished=True)
+            self.focus_outbox[final["session_id"]] = final
+            self.focus = None
+            self.next_focus = now + timedelta(
+                minutes=self.rng.uniform(*FOCUS_GAP_MINUTES)
+            )
+            self.next_switch = min(self.next_switch, now + self._dwell())
+            return
+
+        if row is not None:
+            self._focus_step(row, interval)
+
+        current = self.focus_row(now)
+        self.focus_outbox[current["session_id"]] = current
+
+    def take_focus_rows(self):
+        rows = list(self.focus_outbox.values())
+        self.focus_outbox = {}
+        return rows
+
+    def return_focus_rows(self, rows):
+        """
+        Keep rows whose upload failed, unless a newer row of the same
+        session was queued meanwhile.
+        """
+
+        for row in rows:
+            self.focus_outbox.setdefault(row["session_id"], row)
 
     def sample(self, now, interval):
         """
@@ -127,7 +329,7 @@ class DemoMember:
         if self.idle > 0 or self.rng.random() < self.idle_share / 12:
             self.idle = self.idle + interval if self.rng.random() > 0.08 else 0.0
 
-        return {
+        row = {
             "timestamp": now.strftime(TIMESTAMP_FORMAT),
             "application": self.app,
             "window_title": self.rng.choice(WINDOW_TITLES[self.app]),
@@ -138,6 +340,9 @@ class DemoMember:
             "battery_percent": 80.0,
             "charging": True,
         }
+
+        self._advance_focus(now, row, interval)
+        return row
 
 
 # --------------------------------------------------
@@ -236,6 +441,52 @@ def upload(server, token, rows):
     return accepted
 
 
+def history_focus_sessions(name, profile, seed, days, now, interval=5):
+    """
+    One finished focus session per day of history (mid-morning),
+    simulated sample by sample like the live ones.
+    """
+
+    rows = []
+
+    for day in range(days, 0, -1):
+        start = (now - timedelta(days=day)).replace(
+            hour=10, minute=0, second=0, microsecond=0
+        )
+        end = start + timedelta(minutes=FOCUS_MINUTES)
+
+        if end >= now:
+            continue
+
+        member = DemoMember(name, profile, seed * 1000 + day, start)
+        member.start_focus(start)
+        step = start
+
+        while member.focus is not None:
+            step += timedelta(seconds=interval)
+            member.sample(step, interval)
+
+        rows.extend(member.take_focus_rows())
+
+    return [row for row in rows if row["status"] != "running"]
+
+
+def upload_focus(server, token, rows):
+    """
+    Share focus session rows; returns how many were stored.
+    """
+
+    stored = 0
+
+    for row in rows:
+        request_json(
+            "POST", f"{server}/api/team/focus", {"session": row}, token=token
+        )
+        stored += 1
+
+    return stored
+
+
 def member_is_valid(server, token):
     try:
         request_json("GET", f"{server}/api/team/me", token=token)
@@ -296,7 +547,11 @@ def ensure_members(server, history_days):
             if row["timestamp"] < (now - timedelta(minutes=1)).strftime(TIMESTAMP_FORMAT)
         ]
         accepted = upload(server, token, history)
-        print(f"Created {name}: {accepted} history samples over {history_days} days")
+        sessions = upload_focus(server, token, history_focus_sessions(
+            name, profile, seed, history_days, now
+        ))
+        print(f"Created {name}: {accepted} history samples and {sessions} "
+              f"focus sessions over {history_days} days")
 
         saved = {"name": name, "member_id": member_id, "token": token,
                  "server": server, "seed": seed}
@@ -365,26 +620,71 @@ def flush(server, streams, tokens, pending):
 
     for name in list(streams):
         rows, pending[name] = pending[name], []
+        short = name[len(NAME_PREFIX):].split(" (")[0]
 
         if not rows:
-            status.append(f"{name[len(NAME_PREFIX):].split(' (')[0]}: break")
+            status.append(f"{short}: break")
             continue
+
+        uploaded = False
 
         try:
             upload(server, tokens[name], rows)
-            status.append(f"{name[len(NAME_PREFIX):].split(' (')[0]}: {rows[-1]['application']}")
+            uploaded = True
+            focus = _flush_focus(server, tokens[name], streams[name])
         except ServerError as error:
             if error.status == 401:
                 print(f"{name} was removed on the server; no longer streaming it.")
                 del streams[name]
                 continue
-            pending[name] = rows + pending[name]
+            if not uploaded:
+                pending[name] = rows + pending[name]
+            continue
         except OSError as error:
-            pending[name] = rows + pending[name]
+            if not uploaded:
+                pending[name] = rows + pending[name]
             print(f"Server unreachable ({error}); will retry.")
             return
 
+        status.append(f"{short}: {rows[-1]['application']}{focus}")
+
     print(f"[{datetime.now():%H:%M:%S}] " + " | ".join(status))
+
+
+def _flush_focus(server, token, stream):
+    """
+    Upload a demo member's queued focus rows; returns a short status
+    for the console. A row the server refuses (400) is dropped, as it
+    would never be accepted; on any other failure the rows not sent
+    stay queued and the error is raised.
+    """
+
+    take = getattr(stream, "take_focus_rows", None)
+    rows = take() if take else []
+
+    for index, row in enumerate(rows):
+        try:
+            upload_focus(server, token, [row])
+        except ServerError as error:
+            if error.status == 400:
+                print(f"Focus session refused by the server: {error}")
+                continue
+            stream.return_focus_rows(rows[index:])
+            raise
+        except OSError:
+            stream.return_focus_rows(rows[index:])
+            raise
+
+    if not rows:
+        return ""
+
+    newest = rows[-1]
+
+    if newest["status"] == "running":
+        state = "on task" if newest["current_allowed"] is not False else "OFF TASK"
+        return f" (focus {newest['score']}, {state})"
+
+    return f" (focus done, score {newest['score']})"
 
 
 def _delete_own_members(server, state):

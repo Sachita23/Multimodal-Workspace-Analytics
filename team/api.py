@@ -4,6 +4,7 @@ Flask blueprint for team collection and analysis.
 Member endpoints (Authorization: Bearer <member token>):
     POST   /api/team/join      redeem invite + recorded consent -> token
     POST   /api/team/ingest    upload a batch of observations
+    POST   /api/team/focus     share one focus session (upsert)
     GET    /api/team/me        what the server holds about you
     DELETE /api/team/me        leave the team and delete your data
 
@@ -13,6 +14,7 @@ Main-user endpoints (X-Admin-Key: <admin key>):
     GET    /api/team/live                    current activity, ETag
     GET    /api/team/members/<id>            ?days=1|7|30|all
     GET    /api/team/members/<id>/activity   ?limit&before&after&offset
+    GET    /api/team/members/<id>/focus      shared focus sessions + summary
     POST   /api/team/members/<id>/invite     new code for a pending member
     DELETE /api/team/members/<id>
 """
@@ -38,6 +40,7 @@ from config import (
     TEAM_MAX_BATCH,
     TEAM_SHARED_FIELDS,
 )
+from focus.scoring import session_score
 from team import analysis, db
 
 
@@ -55,6 +58,24 @@ MIN_ADMIN_KEY_LENGTH = 16
 MAX_OBSERVATION_AGE_DAYS = 90
 
 DAY_CHOICES = {"1": 1, "7": 7, "30": 30, "all": None}
+
+# What a member's collector may report for a focus session.
+FOCUS_STATUSES = {db.FOCUS_RUNNING, "Completed", "Stopped", "Interrupted"}
+FOCUS_MAX_APPS = 30
+FOCUS_TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%S"
+
+# Upper bounds, so a broken client cannot store absurd values. A
+# session is planned for at most 8 hours (what `focus --minutes` and
+# the dashboard accept); time totals keep a generous week of seconds.
+FOCUS_MAX_MINUTES = 480
+FOCUS_MAX_SECONDS = 7 * 24 * 60 * 60
+FOCUS_MAX_DEVIATIONS = 100_000
+
+# Each member may start at most this many new focus sessions a day
+# (updates of a known session are not limited): enough for any real
+# use and a 90-day demo backfill, while one token cannot flood the
+# table that every Team page poll aggregates.
+FOCUS_MAX_NEW_SESSIONS_PER_DAY = 200
 
 
 # --------------------------------------------------
@@ -179,6 +200,13 @@ def member_server_url():
     The address members should use, or None when the server only
     listens on this machine (members could not reach it).
     """
+
+    # A public tunnel address (start_project.py --tunnel) works from any
+    # network, so invites use it whenever it is set.
+    tunnel = os.environ.get("WORKSPACE_PUBLIC_URL", "").strip().rstrip("/")
+
+    if tunnel:
+        return tunnel
 
     if API_HOST in ("127.0.0.1", "localhost", "::1"):
         return None
@@ -356,6 +384,187 @@ def validate_observation(raw):
         return None
 
 
+class FocusValidationError(ValueError):
+    """
+    A focus session upload is invalid; the message says which field.
+    """
+
+
+def _focus_text(session, key, required=True):
+    value = session.get(key)
+
+    if value is None and not required:
+        return None
+
+    if not isinstance(value, str):
+        raise FocusValidationError(f"'{key}' must be text.")
+
+    value = value.strip()
+
+    if required and not value:
+        raise FocusValidationError(f"'{key}' must not be empty.")
+
+    if len(value) > MAX_TEXT_LENGTH:
+        raise FocusValidationError(
+            f"'{key}' is longer than {MAX_TEXT_LENGTH} characters."
+        )
+
+    return value
+
+
+def _focus_number(session, key, high, whole=False, nullable=False):
+    value = session.get(key)
+
+    if value is None and nullable:
+        return None
+
+    try:
+        number = _number(value, 0, high)
+    except ValueError:
+        raise FocusValidationError(
+            f"'{key}' must be a number from 0 to {high}."
+        ) from None
+
+    if whole:
+        if not number.is_integer():
+            raise FocusValidationError(f"'{key}' must be a whole number.")
+        return int(number)
+
+    return number
+
+
+def _focus_time(session, key, nullable=False):
+    """
+    An ISO timestamp from the member's clock, stored as local
+    "YYYY-MM-DDTHH:MM:SS". Like observations, it may be up to a day
+    ahead (time zones) and no older than MAX_OBSERVATION_AGE_DAYS.
+    """
+
+    value = session.get(key)
+
+    if value is None and nullable:
+        return None
+
+    try:
+        if not isinstance(value, str) or len(value) > 64:
+            raise ValueError
+        parsed = datetime.fromisoformat(value.strip())
+    except ValueError:
+        raise FocusValidationError(
+            f"'{key}' must be a timestamp like 2026-01-31T14:05:00."
+        ) from None
+
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone().replace(tzinfo=None)
+
+    now = datetime.now()
+
+    if parsed > now + timedelta(days=1):
+        raise FocusValidationError(f"'{key}' is in the future.")
+
+    if parsed < now - timedelta(days=MAX_OBSERVATION_AGE_DAYS):
+        raise FocusValidationError(
+            f"'{key}' is older than {MAX_OBSERVATION_AGE_DAYS} days."
+        )
+
+    return parsed.replace(microsecond=0).strftime(FOCUS_TIMESTAMP_FORMAT)
+
+
+def validate_focus_session(raw):
+    """
+    Return a clean focus session dict (the db.FOCUS_COLUMNS), or raise
+    FocusValidationError saying what is wrong. Nothing is cut or
+    guessed: a collector that sends bad values gets a 400.
+    """
+
+    if not isinstance(raw, dict):
+        raise FocusValidationError("Expected 'session' to be an object.")
+
+    status = raw.get("status")
+
+    if status not in FOCUS_STATUSES:
+        raise FocusValidationError(
+            "'status' must be one of: " + ", ".join(sorted(FOCUS_STATUSES))
+        )
+
+    apps = raw.get("allowed_apps")
+
+    if not isinstance(apps, list) or not 1 <= len(apps) <= FOCUS_MAX_APPS:
+        raise FocusValidationError(
+            f"'allowed_apps' must be a list of 1 to {FOCUS_MAX_APPS} apps."
+        )
+
+    allowed_apps = [
+        _focus_text({"allowed_apps": app}, "allowed_apps") for app in apps
+    ]
+
+    current_allowed = raw.get("current_allowed")
+
+    if current_allowed is not None and not isinstance(current_allowed, bool):
+        raise FocusValidationError("'current_allowed' must be true, false or null.")
+
+    started_at = _focus_time(raw, "started_at")
+    ended_at = _focus_time(raw, "ended_at", nullable=True)
+
+    if status == db.FOCUS_RUNNING and ended_at is not None:
+        raise FocusValidationError("A running session has no 'ended_at'.")
+
+    if status != db.FOCUS_RUNNING and ended_at is None:
+        raise FocusValidationError("A finished session needs 'ended_at'.")
+
+    if ended_at is not None and ended_at < started_at:
+        raise FocusValidationError("'ended_at' is before 'started_at'.")
+
+    goal = _focus_text(raw, "goal", required=False)
+    planned_minutes = _focus_number(
+        raw, "planned_minutes", FOCUS_MAX_MINUTES, whole=True
+    )
+    remaining_s = _focus_number(
+        raw, "remaining_s", FOCUS_MAX_SECONDS, whole=True, nullable=True
+    )
+
+    # Up to a minute of slack for rounding planned seconds to minutes.
+    if remaining_s is not None and remaining_s > planned_minutes * 60 + 60:
+        raise FocusValidationError(
+            "'remaining_s' is longer than the planned session."
+        )
+
+    deviations = _focus_number(
+        raw, "deviations", FOCUS_MAX_DEVIATIONS, whole=True
+    )
+    deviation_seconds = _focus_number(
+        raw, "deviation_seconds", FOCUS_MAX_SECONDS
+    )
+
+    # The score follows from the deviations with the shared formula
+    # (focus.scoring): a client may report less, never more.
+    score = min(
+        _focus_number(raw, "score", 100, whole=True),
+        session_score(deviations, deviation_seconds),
+    )
+
+    return {
+        "session_id": _focus_text(raw, "session_id"),
+        "title": _focus_text(raw, "title"),
+        "goal": goal or "",
+        "planned_minutes": planned_minutes,
+        "allowed_apps": allowed_apps,
+        "started_at": started_at,
+        "ended_at": ended_at,
+        "status": status,
+        "deviations": deviations,
+        "deviation_seconds": deviation_seconds,
+        "allowed_seconds": _focus_number(
+            raw, "allowed_seconds", FOCUS_MAX_SECONDS
+        ),
+        "score": score,
+        "current_app": _focus_text(raw, "current_app", required=False),
+        "current_allowed": current_allowed,
+        "remaining_s": remaining_s,
+        "updated_at": _focus_time(raw, "updated_at"),
+    }
+
+
 # --------------------------------------------------
 # Member endpoints
 # --------------------------------------------------
@@ -429,6 +638,46 @@ def ingest():
         "duplicates": len(valid) - inserted,
         "rejected": len(rows) - len(valid),
     })
+
+
+@team_api.post("/focus")
+@require_member
+def share_focus():
+    """
+    Store (or update) one focus session the member chose to share.
+    Their collector sends the whole row every few seconds while it
+    runs and once more when it ends.
+    """
+
+    body = _json_object()
+
+    if body is None:
+        return _error("Expected a JSON object.", 400)
+
+    try:
+        session = validate_focus_session(body.get("session"))
+    except FocusValidationError as error:
+        return _error(str(error), 400)
+
+    member_id = g.member["id"]
+
+    if not db.focus_session_exists(member_id, session["session_id"], _db_file()):
+        recent = db.focus_sessions_received_since(
+            member_id, db.utc_now() - timedelta(days=1), _db_file()
+        )
+
+        if recent >= FOCUS_MAX_NEW_SESSIONS_PER_DAY:
+            return _error(
+                f"At most {FOCUS_MAX_NEW_SESSIONS_PER_DAY} new focus "
+                "sessions a day; try again later.",
+                429,
+            )
+
+    # A stale update (an older running row sent after the session
+    # ended) is ignored but still answered ok: it never needs a retry.
+    db.upsert_focus_session(member_id, session, _db_file())
+
+    return jsonify({"ok": True})
 
 
 @team_api.get("/me")
@@ -598,6 +847,17 @@ def member_activity(member_id):
         "rows": rows,
         "has_more": has_more,
     })
+
+
+@team_api.get("/members/<int:member_id>/focus")
+@require_admin
+def member_focus(member_id):
+    detail = analysis.member_focus_detail(member_id, _db_file())
+
+    if detail is None:
+        return _error("No such member.", 404)
+
+    return jsonify(detail)
 
 
 @team_api.delete("/members/<int:member_id>")

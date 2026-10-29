@@ -21,6 +21,7 @@ import {
   STATUS_LABELS,
   TEAM_RANGES,
   describeTeamRange,
+  focusAllowedApps,
   formatDuration,
   formatFeatureValue,
   formatRelative,
@@ -32,11 +33,14 @@ import {
   keyWasAccepted,
   loadMemberActivity,
   loadMemberDetail,
+  loadMemberFocus,
   loadTeamLive,
+  memberFocusIntervalMs,
   mergeRows,
   normalizeTeamRange,
   removeMember,
   revokePendingInvite,
+  runningMemberSession,
   setAdminKey,
   subscribeAdminKey,
   teamRangeSearch,
@@ -44,6 +48,8 @@ import {
   useNow,
   usePolling,
 } from "../data/team";
+import { formatScore, scoreBand } from "../data/focus";
+import { formatCountdown } from "../utils/format";
 import "./team.css";
 
 
@@ -440,6 +446,200 @@ const ActivityLog = memo(function ActivityLog({ memberId, onAuthError }) {
     </div>
   );
 });
+
+
+// --------------------------------------------------
+// Focus sessions (team_sync.py focus): /members/<id>/focus, every 5 s
+// while one runs and every 30 s otherwise
+// --------------------------------------------------
+
+function FocusScore({ score }) {
+  const band = scoreBand(score);
+
+  return (
+    <span className="team-focus-score">
+      <strong>{formatScore(score)}</strong>
+      <span className={`focus-score-badge is-${band.band}`}>{band.label}</span>
+    </span>
+  );
+}
+
+
+// The running session: a row from /focus, or the live view's summary of it.
+function LiveFocusSession({ session, receivedAt }) {
+  const now = useNow();
+  const elapsed = receivedAt ? Math.max(0, (now - receivedAt) / 1000) : 0;
+  const remaining = session.remaining_s === null || session.remaining_s === undefined
+    ? null
+    : Math.max(0, Number(session.remaining_s) - elapsed);
+  const allowed = session.current_allowed ?? session.allowed ?? null;
+  const apps = focusAllowedApps(session.allowed_apps);
+  const band = scoreBand(session.score);
+
+  return (
+    <div className={`member-focus-live${allowed === false ? " is-off-task" : ""}`}>
+      <div>
+        <span className="section-kicker">Focus session running</span>
+        <h3>{session.title || "Focus session"}</h3>
+        {session.goal && session.goal !== session.title && <p className="section-sub">{session.goal}</p>}
+        <div className="now-line member-focus-now">
+          {allowed !== null && (
+            <span className={`focus-task-badge ${allowed ? "on-task" : "off-task"}`}>
+              {allowed ? "On task" : "Off task"}
+            </span>
+          )}
+          {session.current_app && <span>Using <strong>{session.current_app}</strong></span>}
+        </div>
+        {apps.length > 0 && (
+          <div className="member-focus-apps">
+            <span>Allowed:</span>
+            {apps.map((app) => <span key={app} className="member-focus-app">{app}</span>)}
+          </div>
+        )}
+      </div>
+      <dl className="member-focus-figures">
+        <div>
+          <dt>Score</dt>
+          <dd className={`focus-score-value is-${band.band}`}>{formatScore(session.score)}</dd>
+          <dd><span className={`focus-score-badge is-${band.band}`}>{band.label}</span></dd>
+        </div>
+        <div>
+          <dt>Left</dt>
+          <dd>{remaining === null ? "--" : formatCountdown(remaining)}</dd>
+        </div>
+        {session.deviations !== undefined && (
+          <div>
+            <dt>Deviations</dt>
+            <dd>{session.deviations}</dd>
+          </div>
+        )}
+      </dl>
+    </div>
+  );
+}
+
+
+const FocusSessionsTable = memo(function FocusSessionsTable({ sessions }) {
+  return (
+    <div className="table-wrapper">
+      <table>
+        <thead>
+          <tr>
+            <th>Start</th>
+            <th>Session</th>
+            <th>Status</th>
+            <th>Planned</th>
+            <th>Allowed apps</th>
+            <th>Deviations</th>
+            <th>Off task</th>
+            <th>Score</th>
+          </tr>
+        </thead>
+        <tbody>
+          {sessions.map((s) => {
+            const apps = focusAllowedApps(s.allowed_apps);
+
+            return (
+              <tr key={s.session_id}>
+                <td>{s.started_at ? String(s.started_at).replace("T", " ") : "--"}</td>
+                <td>
+                  <strong>{s.title || "Focus session"}</strong>
+                  {s.goal && s.goal !== s.title && <small>{s.goal}</small>}
+                </td>
+                <td>
+                  {s.status === "running"
+                    ? <span className="session-badge is-live">Running</span>
+                    : <span className="behavior-badge">{s.status}</span>}
+                </td>
+                <td>{s.planned_minutes ? `${s.planned_minutes} min` : "--"}</td>
+                <td className="window-title" title={apps.join(", ")}>{apps.join(", ") || "--"}</td>
+                <td>{s.deviations ?? 0}</td>
+                <td>{formatMinutes(s.deviation_seconds)}</td>
+                <td><FocusScore score={s.score} /></td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+});
+
+
+function MemberFocus({ memberId, liveFocus, onAuthError }) {
+  const [data, setData] = useState(null);
+  const [fetchedAt, setFetchedAt] = useState(null);
+  const [error, setError] = useState("");
+  const [unsupported, setUnsupported] = useState(false);
+
+  const runningRow = runningMemberSession(data, fetchedAt ?? 0);
+  const liveSummary = liveFocus?.live ?? null;
+  const running = Boolean(runningRow || liveSummary);
+
+  usePolling(async ({ signal, isCurrent }) => {
+    if (!getAdminKey()) return;
+
+    try {
+      const result = await loadMemberFocus(memberId, { signal });
+
+      if (!isCurrent()) return;
+
+      setData(result);
+      setFetchedAt(Date.now());
+      setError("");
+    } catch (err) {
+      if (isAbortError(err) || !isCurrent()) return;
+      if (onAuthError(err)) return;
+
+      // No JSON error body: an API server without the focus endpoint.
+      if (err.status === 404 && !err.fromApi) {
+        setUnsupported(true);
+        return;
+      }
+
+      setError(err.message);
+    }
+  }, memberFocusIntervalMs(running), { enabled: !unsupported, key: `focus:${memberId}` });
+
+  const sessions = Array.isArray(data?.sessions) ? data.sessions : [];
+  const summary = data?.summary;
+
+  return (
+    <div className="session-table-card">
+      <div className="table-header">
+        <h3>Focus sessions</h3>
+        <p>
+          {unsupported
+            ? "This API server doesn't collect focus sessions yet. Restart it with the current code."
+            : summary
+              ? <>
+                  {summary.sessions} session{summary.sessions === 1 ? "" : "s"} shared
+                  {" · "}focus score {formatScore(summary.focus_score)} (finished sessions, last 30 days)
+                  {" · "}{summary.deviation_count ?? 0} deviations
+                </>
+              : "Timed sessions on chosen apps, shared by the member's collector."}
+        </p>
+      </div>
+
+      {error && <p className="form-error table-error" role="alert">{error}</p>}
+
+      {runningRow ? (
+        <LiveFocusSession session={runningRow} receivedAt={fetchedAt} />
+      ) : liveSummary ? (
+        <LiveFocusSession session={liveSummary} receivedAt={null} />
+      ) : null}
+
+      {!unsupported && data && sessions.length === 0 && (
+        <p className="section-sub member-focus-empty">
+          No focus sessions shared yet. Members start one with
+          {" "}<code>python collector/team_sync.py focus --minutes 25 --apps &quot;Code,Terminal&quot;</code>.
+        </p>
+      )}
+
+      {sessions.length > 0 && <FocusSessionsTable sessions={sessions} />}
+    </div>
+  );
+}
 
 
 // --------------------------------------------------
@@ -922,7 +1122,7 @@ function TeamMember() {
           <p>{summary.active_hours_per_day} h per active day ({summary.days_active} days)</p>
         </div>
         <div className="stat-card">
-          <span>Focus Score</span>
+          <span>Active Share</span>
           <h2>{summary.focus_score === null ? "--" : `${summary.focus_score}%`}</h2>
           <p>Active share of tracked time</p>
         </div>
@@ -937,6 +1137,18 @@ function TeamMember() {
           <p>{summary.window_switches.toLocaleString()} window switches</p>
         </div>
       </div>
+
+
+      {/* Focus sessions */}
+
+      {!invitePending && (
+        <MemberFocus
+          key={`focus-${shown.id}`}
+          memberId={shown.id}
+          liveFocus={liveEntry?.focus ?? null}
+          onAuthError={handleAuthError}
+        />
+      )}
 
 
       {/* Comparison with team */}

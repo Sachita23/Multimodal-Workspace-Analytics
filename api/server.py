@@ -203,6 +203,33 @@ def is_loopback_host(host):
     return host in LOOPBACK_HOSTS or is_loopback_address(host.strip("[]"))
 
 
+# Set by `start_project.py --tunnel`: the public https address a tunnel
+# (Cloudflare) forwards to this server. Tunnelled requests reach us from
+# 127.0.0.1, so they are told apart by the forwarding headers below.
+PUBLIC_URL_ENV = "WORKSPACE_PUBLIC_URL"
+
+# Headers a reverse proxy or tunnel adds. The dashboard's own Vite proxy
+# adds none of them, so a loopback request carrying one came from
+# another computer through a tunnel.
+FORWARDING_HEADERS = ("Cf-Connecting-Ip", "X-Forwarded-For", "Forwarded", "X-Real-Ip")
+
+
+def public_url():
+    return os.environ.get(PUBLIC_URL_ENV, "").strip().rstrip("/")
+
+
+def is_local_request():
+    """
+    True for requests made on this machine (the dashboard), not for
+    ones that arrived through a tunnel or proxy.
+    """
+
+    if not is_loopback_address(request.remote_addr):
+        return False
+
+    return not any(request.headers.get(name) for name in FORWARDING_HEADERS)
+
+
 def _has_admin_key():
     supplied = request.headers.get("X-Admin-Key", "")
     expected = current_app.config.get("TEAM_ADMIN_KEY") or ""
@@ -228,7 +255,7 @@ def _single_user_guard():
     if path in OPEN_PATHS or path.startswith(OPEN_PATH_PREFIXES):
         return None
 
-    if is_loopback_address(request.remote_addr) or _has_admin_key():
+    if is_local_request() or _has_admin_key():
         return None
 
     return jsonify({
@@ -252,7 +279,9 @@ def create_app(db_file=None, admin_key=None):
 
     # Listening beyond this machine (WORKSPACE_API_HOST=0.0.0.0): the
     # single-user endpoints answer only to this machine or the admin key.
-    app.config["LOCAL_DATA_ONLY"] = not is_loopback_host(API_HOST)
+    # A public tunnel makes the server reachable from anywhere even on
+    # 127.0.0.1, so the same rule applies then.
+    app.config["LOCAL_DATA_ONLY"] = not is_loopback_host(API_HOST) or bool(public_url())
     app.before_request(_single_user_guard)
 
     app.register_blueprint(core_api)

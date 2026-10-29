@@ -1,5 +1,7 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
 
+import { formatCountdown } from "../utils/format.js";
+
 
 const TEAM_API = "/api/team";
 export const ADMIN_KEY_STORAGE = "workspace-team-admin-key";
@@ -207,6 +209,13 @@ export async function loadTeamLive({ etag, signal } = {}) {
     etag: response.headers.get("ETag"),
     data: body,
   };
+}
+
+
+// Focus sessions a member shared (team_sync.py focus):
+// {sessions: [newest first, max 100], summary: {sessions, focus_score, deviation_count}}.
+export function loadMemberFocus(memberId, { signal } = {}) {
+  return request(`/members/${memberId}/focus`, { signal });
 }
 
 
@@ -694,4 +703,122 @@ export const STATUS_LABELS = {
 
 export function isPendingInvite(status) {
   return status === "invited" || status === "expired";
+}
+
+
+// --------------------------------------------------
+// Focus sessions of members
+// --------------------------------------------------
+
+// A running session row counts as live for this long after it was last
+// received (the collector uploads it every 5 s; the server uses 30 s).
+export const MEMBER_FOCUS_LIVE_SECONDS = 30;
+
+
+function finiteOrNull(value) {
+  const number = value === null || value === undefined || value === "" ? NaN : Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+
+/**
+ * A member's "focus" block from the overview or the live view. The live
+ * view is fresher (5 s), so it wins whenever it has one; older servers
+ * send neither.
+ */
+export function pickMemberFocus(overviewFocus, liveFocus) {
+  if (liveFocus && typeof liveFocus === "object") return liveFocus;
+  if (overviewFocus && typeof overviewFocus === "object") return overviewFocus;
+  return null;
+}
+
+
+/**
+ * What the members table's Focus column shows, `elapsedS` seconds after
+ * the data arrived:
+ *   {kind: "live", text, remaining, score, onTask (true | false | null), title}
+ *   {kind: "score", score, sessions}
+ *   {kind: "none"}
+ */
+export function describeMemberFocus(focus, elapsedS = 0) {
+  const live = focus?.live;
+
+  if (live && typeof live === "object") {
+    const raw = finiteOrNull(live.remaining_s);
+    const remaining = raw === null ? null : Math.max(0, raw - Math.max(0, elapsedS));
+    const score = finiteOrNull(live.score);
+    const parts = ["In focus"];
+
+    if (remaining !== null) parts.push(`${formatCountdown(remaining)} left`);
+    if (score !== null) parts.push(`score ${Math.round(score)}`);
+
+    return {
+      kind: "live",
+      text: parts.join(" · "),
+      remaining,
+      score,
+      onTask: typeof live.allowed === "boolean" ? live.allowed : null,
+      title: live.title || "",
+      currentApp: live.current_app || "",
+    };
+  }
+
+  const score = finiteOrNull(focus?.score);
+
+  if (score !== null) {
+    return { kind: "score", score, sessions: Number(focus.sessions) || 0 };
+  }
+
+  return { kind: "none" };
+}
+
+
+function parseTime(value) {
+  if (!value) return null;
+
+  const text = String(value);
+  const time = new Date(/^\d{4}-\d{2}-\d{2} \d/.test(text) ? text.replace(" ", "T") : text).getTime();
+
+  return Number.isNaN(time) ? null : time;
+}
+
+
+/**
+ * The running session in a /members/<id>/focus answer, or null: the
+ * newest row with status "running", received (or, from older servers,
+ * updated) within MEMBER_FOCUS_LIVE_SECONDS of `now`.
+ */
+export function runningMemberSession(data, now = Date.now()) {
+  const newest = Array.isArray(data?.sessions) ? data.sessions[0] : null;
+
+  if (!newest || newest.status !== "running") return null;
+
+  const seen = parseTime(newest.received_at) ?? parseTime(newest.updated_at);
+
+  if (seen === null || now - seen > MEMBER_FOCUS_LIVE_SECONDS * 1000) return null;
+
+  return newest;
+}
+
+
+/** Polling interval for a member's focus sessions: 5 s while one runs, else 30 s. */
+export function memberFocusIntervalMs(running) {
+  return running ? 5000 : 30000;
+}
+
+
+// Allowed apps arrive as a list (or, from the database, a JSON string).
+export function focusAllowedApps(value) {
+  if (Array.isArray(value)) return value.filter((item) => typeof item === "string");
+
+  if (typeof value === "string" && value.trim()) {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed.filter((item) => typeof item === "string") : [];
+    } catch {
+      return [];
+    }
+  }
+
+  return [];
 }

@@ -110,3 +110,18 @@ test("live card: uncounted states show the assistant's status, not 'Checking…'
   const done = describeFocusLive(running({ current_app: null, allowed: null, status: "Planned focus time reached" }));
   assert.equal(done.label, "Time's up");
 });
+
+
+test("viewingBrowser reports the browser only while the page is visible and focused", async () => {
+  const { viewingBrowser } = await import("./focus.js");
+  const chrome = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
+  const env = (visibilityState, focused) => ({
+    document: { visibilityState, hasFocus: () => focused },
+    navigator: { userAgent: chrome },
+  });
+
+  assert.equal(viewingBrowser(env("visible", true)), "Google Chrome");
+  assert.equal(viewingBrowser(env("hidden", true)), null);
+  assert.equal(viewingBrowser(env("visible", false)), null);
+  assert.equal(viewingBrowser({}), null);
+});

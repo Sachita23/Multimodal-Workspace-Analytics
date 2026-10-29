@@ -29,12 +29,14 @@ import ipaddress
 import json
 import os
 import shutil
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
 import signal
 import subprocess
 import sys
+import threading
 import time
 import webbrowser
 
@@ -87,8 +89,8 @@ ANY_ADDRESS_HOSTS = frozenset({"0.0.0.0", "::", "[::]"})
 MIN_PYTHON = (3, 12)
 
 # With --team or --behind-proxy, these are the only API paths other
-# computers may use: what a member's collector calls (join, ingest, me)
-# and the reachability check in the README. Your own activity
+# computers may use: what a member's collector calls (join, ingest,
+# focus, me) and the reachability check in the README. Your own activity
 # (/api/analytics.csv), pipeline status, Focus sessions and the admin
 # endpoints answer only to this machine; the dashboard reaches them
 # through Vite's proxy on 127.0.0.1.
@@ -96,6 +98,7 @@ MEMBER_PATHS = frozenset({
     "/api/health",
     "/api/team/join",
     "/api/team/ingest",
+    "/api/team/focus",
     "/api/team/me",
 })
 
@@ -394,6 +397,12 @@ def build_parser():
                          help="for HTTPS through a reverse proxy (e.g. Caddy) on this "
                               "machine: the API stays on 127.0.0.1 without debug mode "
                               "and proxied visitors reach only the member endpoints")
+    network.add_argument("--tunnel", action="store_true",
+                         help="give team members a public https address through a "
+                              "Cloudflare quick tunnel (needs cloudflared); works on "
+                              "networks that block laptops from reaching each other, "
+                              "like campus Wi-Fi. Tunnelled visitors reach only the "
+                              "member endpoints")
     parser.add_argument("--demo", action="store_true",
                         help="also stream live demo team members into the team "
                              "server; they are marked Demo and kept out of real "
@@ -409,6 +418,77 @@ def build_parser():
     parser.add_argument("--no-browser", action="store_true",
                         help="don't open the dashboard in a browser")
     return parser
+
+
+# ============================================================
+# PUBLIC TUNNEL (--tunnel)
+# ============================================================
+
+TUNNEL_URL_PATTERN = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
+
+
+def start_tunnel(api_port, timeout=45):
+    """
+    Start a Cloudflare quick tunnel to the local API and return its
+    public https address, or None if it could not be started.
+
+    The API stays on 127.0.0.1; cloudflared connects to it from this
+    machine and marks every request with Cf-Connecting-Ip, which the
+    API uses to keep tunnelled visitors to the member endpoints.
+    """
+
+    binary = shutil.which("cloudflared")
+
+    if binary is None:
+        print()
+        print("[WARNING] cloudflared is not installed, so there is no tunnel.")
+        print("          macOS:   brew install cloudflared")
+        print("          Windows: winget install --id Cloudflare.cloudflared")
+        return None
+
+    print("[STARTING] Public tunnel (Cloudflare)...")
+
+    process = subprocess.Popen(
+        [binary, "tunnel", "--no-autoupdate", "--url", f"http://127.0.0.1:{api_port}"],
+        cwd=str(PROJECT_ROOT),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        errors="replace",
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
+    )
+    processes.append(("Public Tunnel", process))
+
+    if lock_held:
+        try:
+            write_lock()
+        except OSError as exc:
+            print(f"[WARNING] Could not update {LOCK_FILE}: {exc}")
+
+    found = []
+    ready = threading.Event()
+
+    # cloudflared logs a lot; keep reading so its pipe never fills, but
+    # only pick out the address.
+    def read_output():
+        for line in process.stdout:
+            match = TUNNEL_URL_PATTERN.search(line)
+            if match and not found:
+                found.append(match.group(0))
+                ready.set()
+
+        ready.set()
+
+    threading.Thread(target=read_output, daemon=True).start()
+    ready.wait(timeout)
+
+    if not found:
+        print("[WARNING] The tunnel did not report an address; members can't connect this way.")
+        print("          Check the network allows Cloudflare (port 7844), or use a shared hotspot.")
+        return None
+
+    print(f"[RUNNING]  Public tunnel: {found[0]} (PID {process.pid})")
+    return found[0]
 
 
 def wait_for_url(url, timeout=20):
@@ -702,13 +782,18 @@ class MemberEndpointsOnly:
         self.app = app
 
     def __call__(self, environ, start_response):
-        if (environ.get("PATH_INFO", "") in MEMBER_PATHS
-                or is_loopback(environ.get("REMOTE_ADDR"))):
+        # A Cloudflare tunnel connects from this machine; its requests
+        # carry Cf-Connecting-Ip and never count as local.
+        local = (is_loopback(environ.get("REMOTE_ADDR"))
+                 and not environ.get("HTTP_CF_CONNECTING_IP"))
+
+        if environ.get("PATH_INFO", "") in MEMBER_PATHS or local:
             return self.app(environ, start_response)
 
         body = json.dumps({
             "error": "Not available from other computers. Team members "
-                     "only use /api/team/join, /api/team/ingest and /api/team/me.",
+                     "only use /api/team/join, /api/team/ingest, /api/team/focus "
+                     "and /api/team/me.",
         }).encode("utf-8")
 
         start_response("403 Forbidden", [
@@ -757,7 +842,10 @@ def serve_api(mode="team"):
     print("=" * 60)
     print(f"API:        http://{host}:{API_PORT}")
 
-    if mode == "proxy":
+    if mode == "proxy" and os.environ.get("WORKSPACE_PUBLIC_URL"):
+        print(f"Public tunnel: {os.environ['WORKSPACE_PUBLIC_URL']}")
+        print("Visitors through the tunnel can only use:")
+    elif mode == "proxy":
         print("Waiting for a reverse proxy on this machine (see the README,")
         print("'HTTPS for team mode'). Proxied visitors can only use:")
     else:
@@ -785,8 +873,8 @@ def api_command(args):
     user on this machine, serve_api() when other computers connect.
     """
 
-    if args.team or args.behind_proxy:
-        mode = "proxy" if args.behind_proxy else "team"
+    if args.team or args.behind_proxy or args.tunnel:
+        mode = "proxy" if (args.behind_proxy or args.tunnel) else "team"
         return [
             sys.executable,
             "-c",
@@ -948,8 +1036,8 @@ def main(argv=None):
     if args.team:
         os.environ["WORKSPACE_API_HOST"] = "0.0.0.0"
 
-    if args.behind_proxy:
-        # The reverse proxy on this machine is the only way in.
+    if args.behind_proxy or args.tunnel:
+        # The reverse proxy or tunnel on this machine is the only way in.
         os.environ["WORKSPACE_API_HOST"] = "127.0.0.1"
 
     # Every child process reads WORKSPACE_DATA_DIR through config.py, so
@@ -1025,6 +1113,14 @@ def main(argv=None):
         # ----------------------------------------------------
         # 3. Flask API
         # ----------------------------------------------------
+
+        # The tunnel comes first: the API puts its public address into
+        # invite commands, so it must be known before the API starts.
+        if args.tunnel:
+            tunnel_url = start_tunnel(os.environ["WORKSPACE_API_PORT"])
+
+            if tunnel_url:
+                os.environ["WORKSPACE_PUBLIC_URL"] = tunnel_url
 
         start_process(
             "Flask API",
@@ -1105,6 +1201,14 @@ def main(argv=None):
             print("                     other computers reach only the member endpoints)")
         if args.behind_proxy:
             print(f"Reverse proxy      : point it at {api_url} (members' endpoints only)")
+        if args.tunnel:
+            public = os.environ.get("WORKSPACE_PUBLIC_URL")
+            if public:
+                print(f"Public tunnel      : {public}")
+                print("                     members use this address from any network;")
+                print("                     invites on the Team page already contain it")
+            else:
+                print("Public tunnel      : NOT RUNNING (see the warning above)")
         if args.demo:
             print("Demo members       : streaming, marked Demo and kept out of real")
             print("                     members' comparisons and totals")

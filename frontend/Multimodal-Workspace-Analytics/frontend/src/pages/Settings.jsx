@@ -67,11 +67,6 @@ function Settings() {
         </section>
 
         <section className="settings-panel">
-          <div className="settings-panel-heading"><h2>Alerts</h2><p>Choose what the dashboard highlights for you.</p></div>
-          <SettingToggle label="Anomaly alerts" description="Show a dot on the bell when a new unusual episode is detected." checked={draft.anomalyAlerts} onChange={(value) => updatePreference("anomalyAlerts", value)} />
-        </section>
-
-        <section className="settings-panel">
           <div className="settings-panel-heading"><h2>Display</h2><p>Adjust the density of analytic tables.</p></div>
           <SettingToggle label="Compact table rows" description="Show more session and application records at once." checked={draft.compactTables} onChange={(value) => updatePreference("compactTables", value)} />
         </section>

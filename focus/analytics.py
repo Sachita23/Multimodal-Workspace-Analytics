@@ -27,6 +27,7 @@ allowed (in-zone) time only.
 import csv
 import io
 import json
+import math
 import os
 import sys
 
@@ -40,6 +41,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import config  # noqa: E402
+from focus import scoring  # noqa: E402
 
 
 # ---------------------------------------------------------
@@ -500,9 +502,36 @@ def heartbeat_age(heartbeat, now=None):
     return ((now or datetime.now()) - updated).total_seconds()
 
 
+def heartbeat_process_alive(heartbeat):
+    """
+    False only when the process that wrote the heartbeat is certainly
+    gone (it crashed or was killed); True when it lives, is this process,
+    or cannot be checked.
+    """
+
+    try:
+        pid = int((heartbeat or {}).get("pid"))
+    except (TypeError, ValueError):
+        return True
+
+    if pid <= 0 or pid == os.getpid():
+        return True
+
+    try:
+        import psutil
+    except ImportError:
+        return True
+
+    try:
+        return bool(psutil.pid_exists(pid))
+    except Exception:  # noqa: BLE001 - unsure means alive
+        return True
+
+
 def running_session_id(heartbeat, now=None, max_age=ACTIVE_SESSION_GRACE_SECONDS):
     """
-    The session id a recent heartbeat reports as running, else None.
+    The session id a recent heartbeat reports as running, else None
+    (also when the process that wrote it has died).
     """
 
     age = heartbeat_age(heartbeat, now)
@@ -513,34 +542,134 @@ def running_session_id(heartbeat, now=None, max_age=ACTIVE_SESSION_GRACE_SECONDS
     if not heartbeat.get("running"):
         return None
 
+    if not heartbeat_process_alive(heartbeat):
+        return None
+
     return heartbeat.get("session_id") or None
+
+
+LIVE_SOURCES = ("dashboard", "assistant", "member")
+LIVE_STATES = ("allowed", "deviation", "idle", "neutral", "self", "unknown")
+
+# The live payload lists at most this many deviations, newest first.
+MAX_RECENT_DEVIATIONS = 10
+
+
+def empty_live(status="Focus Assistant not running", stale=True, updated_at=None):
+    """
+    The /api/focus/live payload when no session runs. Every key of the
+    live contract is present (see focus/engine.py for a running one).
+    """
+
+    return {
+        "running": False,
+        "stale": stale,
+        "session_id": None,
+        "source": None,
+        "title": None,
+        "goal": None,
+        "started_at": None,
+        "planned_s": None,
+        "remaining_s": None,
+        "allowed_apps": [],
+        "current_app": None,
+        "current_window": None,
+        "allowed": None,
+        "state": None,
+        "status": status,
+        "score": None,
+        "deviations": 0,
+        "deviation_seconds": 0,
+        "last_deviation": None,
+        "recent_deviations": [],
+        "updated_at": updated_at,
+        "pid": None,
+    }
+
+
+def _optional_int(value):
+    if value is None or isinstance(value, bool):
+        return None
+
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+
+    return int(number) if math.isfinite(number) else None
+
+
+def _optional_str(value):
+    return value if isinstance(value, str) else None
+
+
+def _str_list(value):
+    if not isinstance(value, list):
+        return []
+
+    return [item for item in value if isinstance(item, str)]
+
+
+def _last_deviation(value):
+    if not isinstance(value, dict) or not isinstance(value.get("app"), str):
+        return None
+
+    return {
+        "app": value["app"],
+        "window_title": _optional_str(value.get("window_title")) or "",
+        "at": _optional_str(value.get("at")),
+        "penalty": _optional_int(value.get("penalty")) or 0,
+    }
+
+
+def _recent_deviations(value):
+    if not isinstance(value, list):
+        return []
+
+    items = []
+
+    for item in value:
+        if isinstance(item, dict) and isinstance(item.get("app"), str):
+            items.append({
+                "app": item["app"],
+                "at": _optional_str(item.get("at")),
+                "seconds": max(0, _optional_int(item.get("seconds")) or 0),
+            })
+
+    return items[:MAX_RECENT_DEVIATIONS]
 
 
 def live_status(data_dir=None, now=None, stale_after=LIVE_STALE_SECONDS):
     """
-    The /api/focus/live payload.
+    The /api/focus/live payload, from the heartbeat in live.json.
+
+    Heartbeats written before the focus engine existed (or by the Tk
+    assistant) lack the newer fields; those get their defaults (score
+    None, no deviations).
     """
 
     heartbeat = read_live_file(data_dir)
     age = heartbeat_age(heartbeat, now)
     stale = age is None or abs(age) > stale_after
 
-    result = {
-        "running": False,
-        "stale": stale,
-        "title": None,
-        "goal": None,
-        "remaining_s": None,
-        "current_app": None,
-        "allowed": None,
-        "status": "Focus Assistant not running",
-        "updated_at": heartbeat.get("updated_at") if heartbeat else None,
-    }
+    result = empty_live(
+        stale=stale,
+        updated_at=heartbeat.get("updated_at") if heartbeat else None,
+    )
 
     if stale:
         return result
 
     running = bool(heartbeat.get("running"))
+    result["pid"] = _optional_int(heartbeat.get("pid"))
+
+    if running and not heartbeat_process_alive(heartbeat):
+        # The session's process ended without stopping it: nothing runs
+        # (and nothing can be stopped) until the next start records it
+        # as interrupted.
+        result["status"] = "Focus session interrupted"
+        return result
+
     result["running"] = running
     result["status"] = heartbeat.get("status") or (
         "Focus session running" if running else "No active session"
@@ -549,13 +678,30 @@ def live_status(data_dir=None, now=None, stale_after=LIVE_STALE_SECONDS):
     if running:
         allowed = heartbeat.get("allowed")
         remaining = heartbeat.get("remaining_s")
+        source = heartbeat.get("source")
+        state = heartbeat.get("state")
+        score = _optional_int(heartbeat.get("score"))
 
         result.update({
+            "session_id": _optional_str(heartbeat.get("session_id")),
+            "source": source if source in LIVE_SOURCES else None,
             "title": heartbeat.get("title"),
             "goal": heartbeat.get("goal"),
+            "started_at": _optional_str(heartbeat.get("started_at")),
+            "planned_s": _optional_int(heartbeat.get("planned_s")),
             "remaining_s": None if remaining is None else safe_int(remaining),
+            "allowed_apps": _str_list(heartbeat.get("allowed_apps")),
             "current_app": heartbeat.get("current_app"),
+            "current_window": _optional_str(heartbeat.get("current_window")),
             "allowed": allowed if isinstance(allowed, bool) else None,
+            "state": state if state in LIVE_STATES else None,
+            "score": score,
+            "deviations": max(0, _optional_int(heartbeat.get("deviations")) or 0),
+            "deviation_seconds": max(
+                0, _optional_int(heartbeat.get("deviation_seconds")) or 0
+            ),
+            "last_deviation": _last_deviation(heartbeat.get("last_deviation")),
+            "recent_deviations": _recent_deviations(heartbeat.get("recent_deviations")),
         })
 
     return result
@@ -624,16 +770,29 @@ def _timelines(event_rows):
     return grouped
 
 
-def account_timeline(timeline, start_dt, end_dt):
+def account_timeline(timeline, start_dt, end_dt, count_final_deviation=False):
     """
     Seconds per state, deviation episodes, per-app deviation seconds,
     application switches and the longest uninterrupted in-zone run for
     one session's [(timestamp, state, application), ...] timeline.
+
+    This is the one deviation-episode rule: recorded sessions and the live
+    engine (focus/engine.py, through deviation_starts_episode) both use it.
+    "episode_list" holds {"at", "app", "seconds"} per episode, oldest first;
+    "in_excursion" says whether the last counted row left the user outside
+    the zone (a deviation that a new deviation row would continue).
+
+    count_final_deviation: a deviation row logged at end_dt itself (the
+    switch the live engine has just seen and announced, or one in the
+    second a session was stopped) is an episode, of 0 s so far, so the
+    switch penalty shows at once. Off for interrupted sessions, whose
+    end is their last row.
     """
 
     seconds = {ALLOWED: 0.0, DEVIATION: 0.0, IDLE: 0.0, NEUTRAL: 0.0}
     deviation_apps = {}
     allowed_spans = []
+    episode_list = []
     episodes = 0
     switches = 0
     longest_run = 0.0
@@ -649,7 +808,14 @@ def account_timeline(timeline, start_dt, end_dt):
         duration = _overlap_seconds(t0, t1, start_dt, end_dt)
         seconds[state] += duration
 
-        if duration <= 0:
+        final_switch = (
+            count_final_deviation
+            and state == DEVIATION
+            and index == len(rows) - 1
+            and start_dt <= t0 == end_dt
+        )
+
+        if duration <= 0 and not final_switch:
             # A row that lasted no time inside the session (e.g. the last
             # row of an interrupted session, which ends at that row) is
             # neither a deviation episode nor an application switch.
@@ -671,6 +837,13 @@ def account_timeline(timeline, start_dt, end_dt):
             # windows or tabs it passes through.
             if previous_state != DEVIATION:
                 episodes += 1
+                episode_list.append({
+                    "at": max(t0, start_dt),
+                    "app": application,
+                    "seconds": 0.0,
+                })
+
+            episode_list[-1]["seconds"] += duration
 
         if state in (ALLOWED, DEVIATION):
             idle_stretch = 0.0
@@ -693,9 +866,36 @@ def account_timeline(timeline, start_dt, end_dt):
         "deviation_apps": deviation_apps,
         "allowed_spans": allowed_spans,
         "episodes": episodes,
+        "episode_list": episode_list,
+        "in_excursion": previous_state == DEVIATION,
         "switches": switches,
         "longest_run": longest_run,
     }
+
+
+def session_timeline(event_rows, session_id):
+    """
+    One session's [(timestamp, state, application), ...] timeline from
+    focus_events.csv rows, in the order account_timeline reads it.
+    """
+
+    return _timelines(event_rows).get(session_id, [])
+
+
+def deviation_starts_episode(timeline, start_dt):
+    """
+    True when the timeline's last row is a deviation that starts a new
+    deviation episode (rather than continuing the current one), judged
+    by account_timeline over the rows before it.
+    """
+
+    if not timeline or timeline[-1][1] != DEVIATION:
+        return False
+
+    at = timeline[-1][0]
+    before = account_timeline(timeline[:-1], start_dt, max(at, start_dt))
+
+    return not before["in_excursion"]
 
 
 def build_records(session_rows, event_rows, now=None, active_session_id=None,
@@ -753,7 +953,10 @@ def build_records(session_rows, event_rows, now=None, active_session_id=None,
         )
         allowed_apps = latest_row.get("allowed_apps") or start.get("allowed_apps") or ""
 
-        result = account_timeline(timeline, start_dt, end_dt)
+        result = account_timeline(
+            timeline, start_dt, end_dt,
+            count_final_deviation=status != STATUS_INTERRUPTED,
+        )
         allowed_seconds = result["seconds"][ALLOWED]
         deviation_seconds = result["seconds"][DEVIATION]
         tracked = allowed_seconds + deviation_seconds
@@ -763,6 +966,7 @@ def build_records(session_rows, event_rows, now=None, active_session_id=None,
             if value > 0
         }
         top_app = max(deviation_apps, key=deviation_apps.get) if deviation_apps else None
+        deviation_seconds_int = int(round(deviation_seconds))
 
         records.append({
             "id": sid,
@@ -779,11 +983,14 @@ def build_records(session_rows, event_rows, now=None, active_session_id=None,
             # (begin, end) of each in-zone stretch, to split focus time
             # by day.
             "allowed_spans": result["allowed_spans"],
-            "deviation_seconds": int(round(deviation_seconds)),
+            "deviation_seconds": deviation_seconds_int,
             "idle_seconds": int(round(result["seconds"][IDLE])),
             "neutral_seconds": int(round(result["seconds"][NEUTRAL])),
             "adherence": (allowed_seconds / tracked * 100) if tracked > 0 else None,
             "deviations": result["episodes"],
+            # {"at", "app", "seconds"} per deviation episode, oldest first.
+            "deviation_episodes": result["episode_list"],
+            "score": scoring.session_score(result["episodes"], deviation_seconds_int),
             "deviation_apps": deviation_apps,
             "switches": result["switches"],
             "longest_focus_seconds": int(round(result["longest_run"])),
@@ -895,6 +1102,7 @@ def summarize(records, now=None):
         "session_seconds_total": int(sum(record["actual_seconds"] for record in records)),
         "deviation_count": sum(record["deviations"] for record in records),
         "deviation_sources": deviation_sources(records),
+        "focus_score": scoring.overall_score(records, now),
     }
 
 
@@ -938,4 +1146,5 @@ def session_json(record):
         "switches": record["switches"],
         "longest_focus_s": record["longest_focus_seconds"],
         "top_deviation_app": record["top_deviation_app"],
+        "score": record.get("score"),
     }

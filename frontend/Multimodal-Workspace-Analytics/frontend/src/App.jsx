@@ -20,7 +20,6 @@ const Sessions = lazy(() => import("./pages/Sessions"));
 const Applications = lazy(() => import("./pages/Applications"));
 const Behavior = lazy(() => import("./pages/Behavior"));
 const Trends = lazy(() => import("./pages/Trends"));
-const Anomalies = lazy(() => import("./pages/Anomalies"));
 const Insights = lazy(() => import("./pages/Insights"));
 const Focus = lazy(() => import("./pages/Focus"));
 const Settings = lazy(() => import("./pages/Settings"));
@@ -60,7 +59,6 @@ function AppRoutes() {
 
           <Route path="/trends" element={<Trends />} />
 
-          <Route path="/anomalies" element={<Anomalies />} />
 
           <Route path="/insights" element={<Insights />} />
 

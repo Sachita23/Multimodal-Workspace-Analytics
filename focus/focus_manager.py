@@ -57,6 +57,54 @@ STATE_NEUTRAL = "neutral"
 STATE_SELF = "self"
 STATE_UNKNOWN = "unknown"
 
+# Rows that could not be saved (e.g. the CSV is open in Excel on Windows,
+# or the disk is full) wait in memory, oldest first, and are written as
+# soon as the file can be written again, so the timeline keeps them. Past
+# this many, new rows are refused (and retried) instead of queued.
+MAX_PENDING_EVENTS = 3600
+
+# Other names of one application, as the user may type them or another
+# OS reports them (lower case, .exe removed) -> one canonical name. An
+# application matches the focus zone only by its canonical name, never
+# by a part of it, so "Code" does not let Xcode in, nor "Mail" Gmail.
+APPLICATION_ALIASES = {
+    "code": "visual studio code",
+    "vscode": "visual studio code",
+    "vs code": "visual studio code",
+    "chrome": "google chrome",
+    "edge": "microsoft edge",
+    "msedge": "microsoft edge",
+    "firefox": "mozilla firefox",
+    "word": "microsoft word",
+    "winword": "microsoft word",
+    "excel": "microsoft excel",
+    "powerpoint": "microsoft powerpoint",
+    "powerpnt": "microsoft powerpoint",
+    "outlook": "microsoft outlook",
+    "olk": "microsoft outlook",
+    "onenote": "microsoft onenote",
+    "teams": "microsoft teams",
+    "ms-teams": "microsoft teams",
+    "iterm": "iterm2",
+    "zoom.us": "zoom",
+    "pycharm64": "pycharm",
+    "idea": "intellij idea",
+    "idea64": "intellij idea",
+    "obs": "obs studio",
+    "obs64": "obs studio",
+    "windowsterminal": "windows terminal",
+    "explorer": "file explorer",
+    "devenv": "visual studio",
+}
+
+
+def canonical_app_name(value):
+    """Lower-case application name with .exe removed, runs of spaces
+    collapsed and known aliases resolved ("" for no name)."""
+    name = " ".join(analytics.normalize_application(value).split())
+    return APPLICATION_ALIASES.get(name, name)
+
+
 STATE_STATUS = {
     STATE_ALLOWED: STATUS_ALLOWED,
     STATE_DEVIATION: STATUS_DEVIATION,
@@ -231,7 +279,13 @@ class FocusManager:
     `last_write_error` and never raised into the monitor loop.
     """
 
-    def __init__(self, data_dir=None, idle_threshold=None):
+    # Written into the heartbeat's "source" (the focus engine overrides it).
+    source = "assistant"
+
+    def __init__(self, data_dir=None, idle_threshold=None, clock=None):
+        # clock() -> the current local time; datetime.now unless a caller
+        # (the focus engine, tests) supplies its own.
+        self.clock = clock
         self.data_dir = Path(data_dir) if data_dir else Path(config.FOCUS_DATA_DIR)
         self.sessions_file = self.data_dir / analytics.SESSIONS_FILE_NAME
         self.events_file = self.data_dir / analytics.EVENTS_FILE_NAME
@@ -257,7 +311,13 @@ class FocusManager:
         # Wall-clock time of the last monitor tick, and of the newest
         # timeline row written, while a session runs.
         self.last_tick_at = None
+        self.previous_tick_at = None
         self.last_event_at = None
+        # The tick before the current deviation row was logged: the
+        # window came to the front some time after it.
+        self.deviation_since = None
+        # Timeline rows not saved yet (see MAX_PENDING_EVENTS).
+        self.pending_events = []
 
         try:
             self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -268,6 +328,9 @@ class FocusManager:
         self._migrate_schema(self.sessions_file, SESSION_FIELDS)
         self._migrate_schema(self.events_file, EVENT_FIELDS)
         self.recovered_sessions = self.recover_orphaned_sessions()
+
+    def _now(self):
+        return self.clock() if self.clock is not None else datetime.now()
 
     @staticmethod
     def normalize_app_name(value):
@@ -307,7 +370,7 @@ class FocusManager:
         self.goal = goal
         self.duration_minutes = duration_minutes
         self.allowed_apps = cleaned_apps
-        self.started_at = datetime.now()
+        self.started_at = self._now()
         self.expected_end_at = self.started_at + timedelta(minutes=duration_minutes)
         self.running = True
         self.last_application = None
@@ -315,7 +378,9 @@ class FocusManager:
         self.last_compliance_status = None
         self.last_event_key = None
         self.last_tick_at = None
+        self.previous_tick_at = None
         self.last_event_at = None
+        self.deviation_since = None
 
         self._write_session_start()
         return self.session_id
@@ -323,7 +388,7 @@ class FocusManager:
     def remaining_seconds(self):
         if not self.running or not self.expected_end_at:
             return 0
-        remaining = (self.expected_end_at - datetime.now()).total_seconds()
+        remaining = (self.expected_end_at - self._now()).total_seconds()
         return max(0, int(remaining))
 
     # ------------------------------------------------------------ classify
@@ -346,19 +411,14 @@ class FocusManager:
         )
 
     def _matches_allowed(self, application):
-        app_normalized = self.normalize_app_name(application)
-        if not app_normalized:
+        """Whether `application` is one of the allowed applications: the
+        same name once case, .exe and aliases are set aside. A name that
+        merely contains (or is contained in) an allowed one does not match.
+        """
+        app_name = canonical_app_name(application)
+        if not app_name:
             return False
-        for allowed in self.allowed_apps:
-            allowed_normalized = self.normalize_app_name(allowed)
-            if not allowed_normalized:
-                continue
-            if (
-                allowed_normalized in app_normalized
-                or app_normalized in allowed_normalized
-            ):
-                return True
-        return False
+        return any(canonical_app_name(allowed) == app_name for allowed in self.allowed_apps)
 
     def classify(self, application, window_title="", pid=None, idle_seconds=0.0):
         """One of: idle, self, unknown, neutral, allowed, deviation."""
@@ -401,11 +461,15 @@ class FocusManager:
         Idle row goes at the last tick, the last moment anything was
         observed. Returns True when it logged one.
         """
-        now = now or datetime.now()
+        now = now or self._now()
         if not self.running:
             self.last_tick_at = None
+            self.previous_tick_at = None
             return False
+        if self.last_tick_at is not None and now == self.last_tick_at:
+            return False  # this tick was already noted (the engine notes it first)
         last, self.last_tick_at = self.last_tick_at, now
+        self.previous_tick_at = last
         if last is None or (now - last).total_seconds() <= MAX_TICK_GAP_SECONDS:
             return False
         if self.last_event_key == (STATE_IDLE,):
@@ -418,12 +482,30 @@ class FocusManager:
 
     def _idle_started_at(self, now, idle_seconds):
         """When input stopped: now - idle_seconds, but never before the
-        last row written (or the start of the session)."""
+        last row written (or the start of the session).
+
+        When the last input came after the current deviation window
+        appeared (the user switched to it, e.g. clicked into a video and
+        then sat watching), idle starts at least a second after the
+        deviation row, so the switch stays an episode, as announced.
+        Back-dating it onto the deviation row would erase the deviation
+        and its penalty. A window that came to the front after the last
+        input (a pop-up while the user was away) was never a deviation.
+        """
         try:
             started = now - timedelta(seconds=max(0.0, float(idle_seconds or 0)))
         except (TypeError, ValueError, OverflowError):
             return now
-        for floor in (self.started_at, self.last_event_at):
+        deviation_floor = None
+        if (
+            self.deviation_since is not None
+            and self.last_event_at is not None
+            and self.last_event_key
+            and self.last_event_key[0] == STATE_DEVIATION
+            and started >= self.deviation_since
+        ):
+            deviation_floor = self.last_event_at + timedelta(seconds=1)
+        for floor in (self.started_at, self.last_event_at, deviation_floor):
             if floor is not None and started < floor:
                 started = floor
         return min(started, now)
@@ -441,8 +523,11 @@ class FocusManager:
             return {"allowed": True, "state": "inactive", "status": "No active focus session",
                     "application": application, "window_title": window_title, "logged": False}
 
-        now = datetime.now()
+        now = self._now()
+        if self.pending_events:
+            self.flush_pending_events()
         self.record_tick_gap(now)
+        previous_tick = self.previous_tick_at
 
         state = self.classify(application, window_title, pid, idle_seconds)
         result = {
@@ -469,10 +554,16 @@ class FocusManager:
         if key != self.last_event_key:
             # Idle began when input stopped, not when the threshold passed.
             timestamp = self._idle_started_at(now, idle_seconds) if state == STATE_IDLE else now
+            was_deviation = bool(self.last_event_key) and self.last_event_key[0] == STATE_DEVIATION
             if self._write_focus_event(application, window_title, result["allowed"],
                                        result["status"], timestamp=timestamp):
                 self.last_event_key = key
                 result["logged"] = True
+                if state == STATE_DEVIATION:
+                    # Only a switch from outside a deviation can be erased
+                    # by back-dated idle (see _idle_started_at); another
+                    # window of the same excursion changes no episode.
+                    self.deviation_since = None if was_deviation else (previous_tick or now)
 
         if state != STATE_UNKNOWN:
             self.last_application = application
@@ -504,7 +595,7 @@ class FocusManager:
         counts as neither focus nor deviation."""
         if not self.running:
             return
-        now = datetime.now()
+        now = self._now()
         due = min(self.expected_end_at or now, now)
         self.last_event_key = None
         # The marker covers the time until the prompt is answered (no
@@ -516,9 +607,10 @@ class FocusManager:
     def stop_session(self, completion_status="Stopped", ended_at=None):
         if not self.running:
             return
-        stopped_at = ended_at or datetime.now()
+        stopped_at = ended_at or self._now()
         if self.started_at and stopped_at < self.started_at:
             stopped_at = self.started_at
+        self.flush_pending_events()
         self._write_session_end(stopped_at, completion_status)
         self.running = False
         self.last_event_key = None
@@ -536,7 +628,7 @@ class FocusManager:
 
         # Extending never shortens: add to the planned end, or to now once
         # the planned end has passed.
-        now = datetime.now()
+        now = self._now()
         base = max(self.expected_end_at, now) if self.expected_end_at else now
         self.duration_minutes += additional_minutes
         self.expected_end_at = base + timedelta(minutes=additional_minutes)
@@ -621,11 +713,18 @@ class FocusManager:
             "session_id": self.session_id if running else None,
             "title": self.title if running else None,
             "goal": self.goal if running else None,
+            "source": self.source if running else None,
+            "started_at": (
+                self.started_at.isoformat(timespec="seconds")
+                if running and self.started_at else None
+            ),
+            "planned_s": int(self.duration_minutes) * 60 if running else None,
             "remaining_s": self.remaining_seconds() if running else None,
+            "allowed_apps": list(self.allowed_apps) if running else [],
             "current_app": current_app if running else None,
             "allowed": allowed if running and isinstance(allowed, bool) else None,
             "status": status or ("Focus session running" if running else "No active session"),
-            "updated_at": datetime.now().isoformat(timespec="seconds"),
+            "updated_at": self._now().isoformat(timespec="seconds"),
             "pid": os.getpid(),
         }
 
@@ -755,7 +854,7 @@ class FocusManager:
     def _write_session_event(self, event_type, completion_status=""):
         return self._safe_append(
             self.sessions_file, SESSION_FIELDS,
-            self._session_row(event_type, datetime.now(), completion_status),
+            self._session_row(event_type, self._now(), completion_status),
         )
 
     def _write_session_start(self):
@@ -770,23 +869,40 @@ class FocusManager:
             self._session_row("END", stopped_at, completion_status),
         )
 
+    def flush_pending_events(self):
+        """Write the queued timeline rows, oldest first; True when none
+        is left waiting."""
+        while self.pending_events:
+            if not self._safe_append(self.events_file, EVENT_FIELDS, self.pending_events[0]):
+                return False
+            self.pending_events.pop(0)
+        return True
+
+    def _queue_focus_event(self, row):
+        """Accept a timeline row: written now, or queued until the file
+        can be written. False only when the queue is full."""
+        if len(self.pending_events) >= MAX_PENDING_EVENTS and not self.flush_pending_events():
+            return False
+        self.pending_events.append(row)
+        self.flush_pending_events()
+        return True
+
     def _write_focus_event(self, application, window_title, allowed, status, timestamp=None):
-        timestamp = timestamp or datetime.now()
-        written = self._safe_append(
-            self.events_file,
-            EVENT_FIELDS,
-            {
-                "timestamp": timestamp.strftime("%Y-%m-%d %H:%M:%S"),
-                "focus_session_id": self.session_id,
-                "title": self.title,
-                "goal": self.goal,
-                "application": application,
-                "window_title": window_title,
-                "allowed": "" if allowed is None else bool(allowed),
-                "status": status,
-                "remaining_seconds": self.remaining_seconds(),
-            },
-        )
-        if written:
+        """Log a timeline row. True when it is part of the timeline: saved,
+        or (while the file cannot be written) queued to be saved later,
+        with `last_write_error` saying why it waits."""
+        timestamp = timestamp or self._now()
+        accepted = self._queue_focus_event({
+            "timestamp": timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+            "focus_session_id": self.session_id,
+            "title": self.title,
+            "goal": self.goal,
+            "application": application,
+            "window_title": window_title,
+            "allowed": "" if allowed is None else bool(allowed),
+            "status": status,
+            "remaining_seconds": self.remaining_seconds(),
+        })
+        if accepted:
             self.last_event_at = timestamp.replace(microsecond=0)
-        return written
+        return accepted

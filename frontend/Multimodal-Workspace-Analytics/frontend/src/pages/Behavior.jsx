@@ -1,10 +1,5 @@
 import {
   ResponsiveContainer,
-  BarChart,
-  Bar,
-  XAxis,
-  YAxis,
-  CartesianGrid,
   Tooltip,
   Legend,
   PieChart,
@@ -15,19 +10,13 @@ import {
 import DashboardLayout from "../layouts/DashboardLayout";
 import { AnalyticsGate, CollectingState } from "../components/PageState";
 import { MIN_ROWS_FOR_INSIGHTS } from "../data/analytics";
-import { BRAND_COLOR, behaviorColor, formatDuration, isBehaviorLabel } from "../utils/format";
+import { behaviorColor, formatDuration, isBehaviorLabel } from "../utils/format";
 
 
 function BehaviorContent({ data }) {
   const { behaviorAnalytics, behaviorDistribution, metrics } = data;
 
   const behaviorTotal = behaviorDistribution.reduce((total, item) => total + item.seconds, 0);
-
-  // avgIdleRatio is already a 0-100 percentage (duration-weighted).
-  const idleRatioData = behaviorAnalytics.map((item) => ({
-    behavior: item.behavior,
-    idleRatio: item.avgIdleRatio,
-  }));
 
   return (
     <>
@@ -111,53 +100,6 @@ function BehaviorContent({ data }) {
                 />
                 <Legend verticalAlign="bottom" />
               </PieChart>
-            </ResponsiveContainer>
-          </div>
-        </div>
-
-        {/* IDLE RATIO */}
-        <div className="chart-card">
-          <div className="chart-header">
-            <div>
-              <h3>Idle Ratio by Behavior</h3>
-              <p>Idle share of tracked time for each behavior type</p>
-            </div>
-          </div>
-
-          <div className="chart-container">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart
-                data={idleRatioData}
-                margin={{ top: 10, right: 20, left: 0, bottom: 20 }}
-              >
-                <CartesianGrid strokeDasharray="3 3" />
-
-                <XAxis
-                  dataKey="behavior"
-                  tick={{ fontSize: 11 }}
-                  interval={0}
-                  angle={-20}
-                  textAnchor="end"
-                  height={60}
-                />
-
-                <YAxis
-                  domain={[0, 100]}
-                  tickFormatter={(value) => `${value}%`}
-                />
-
-                <Tooltip
-                  formatter={(value) => [`${Number(value).toFixed(1)}%`, "Idle ratio"]}
-                />
-
-                <Bar
-                  dataKey="idleRatio"
-                  name="Idle ratio"
-                  fill={BRAND_COLOR}
-                  radius={[4, 4, 0, 0]}
-                  isAnimationActive={false}
-                />
-              </BarChart>
             </ResponsiveContainer>
           </div>
         </div>

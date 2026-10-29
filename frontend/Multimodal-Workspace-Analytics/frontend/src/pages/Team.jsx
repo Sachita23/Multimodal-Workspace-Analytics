@@ -23,6 +23,7 @@ import {
   STATUS_LABELS,
   TEAM_RANGES,
   createInvite,
+  describeMemberFocus,
   describeTeamRange,
   formatDuration,
   formatFeatureValue,
@@ -36,6 +37,7 @@ import {
   loadTeamLive,
   loadTeamOverview,
   normalizeTeamRange,
+  pickMemberFocus,
   reissueInvite,
   revokePendingInvite,
   setAdminKey,
@@ -44,6 +46,7 @@ import {
   useNow,
   usePolling,
 } from "../data/team";
+import { formatScore, scoreBand } from "../data/focus";
 import "./team.css";
 
 
@@ -100,6 +103,49 @@ function NowCell({ current }) {
       )}
     </div>
   );
+}
+
+
+// Focus column: a running focus session (with a ticking countdown), else
+// the member's overall focus score.
+function FocusCell({ focus, receivedAt }) {
+  const now = useNow();
+  const elapsed = receivedAt ? (now - receivedAt) / 1000 : 0;
+  const info = describeMemberFocus(focus, elapsed);
+
+  if (info.kind === "live") {
+    const band = scoreBand(info.score);
+
+    return (
+      <div className="team-focus-cell" title={info.title ? `Focus session: ${info.title}` : undefined}>
+        <div className="now-line">
+          {info.onTask !== null && (
+            <span className={`focus-task-badge ${info.onTask ? "on-task" : "off-task"}`}>
+              {info.onTask ? "On task" : "Off task"}
+            </span>
+          )}
+          <span className={`focus-score-badge is-${band.band}`}>{band.label}</span>
+        </div>
+        <span className="team-focus-text">{info.text}</span>
+        {info.onTask === false && info.currentApp && (
+          <span className="now-window">In {info.currentApp}</span>
+        )}
+      </div>
+    );
+  }
+
+  if (info.kind === "score") {
+    const band = scoreBand(info.score);
+
+    return (
+      <span className="team-focus-score" title={`Average of ${info.sessions} finished focus sessions`}>
+        <strong>{formatScore(info.score)}</strong>
+        <span className={`focus-score-badge is-${band.band}`}>{band.label}</span>
+      </span>
+    );
+  }
+
+  return <span className="muted-text">--</span>;
 }
 
 
@@ -551,6 +597,8 @@ function Team() {
   const [error, setError] = useState(null);
 
   const [live, setLive] = useState(null);
+  const [liveDataAt, setLiveDataAt] = useState(null);
+  const [overviewAt, setOverviewAt] = useState(null);
   const [liveCheckedAt, setLiveCheckedAt] = useState(null);
   const [liveError, setLiveError] = useState(null);
   const [liveSupported, setLiveSupported] = useState(true);
@@ -614,6 +662,7 @@ function Team() {
       if (!isCurrent()) return;
 
       setOverview(data);
+      setOverviewAt(Date.now());
       setOverviewDays(days);
       setError(null);
       setNeedsKey(false);
@@ -646,6 +695,7 @@ function Team() {
         liveEtagRef.current = result.etag;
         announceStatusChanges(result.data.members || []);
         setLive(result.data);
+        setLiveDataAt(Date.now());
       }
 
       setLiveCheckedAt(Date.now());
@@ -692,8 +742,10 @@ function Team() {
       last_seen: now?.last_seen ?? m.last_seen,
       simulated: Boolean(m.simulated ?? now?.simulated),
       current: now?.current ?? null,
+      focus: pickMemberFocus(m.focus, now?.focus),
+      focusAt: now?.focus ? liveDataAt : overviewAt,
     };
-  }), [overview, liveById]);
+  }), [overview, liveById, liveDataAt, overviewAt]);
 
 
   // --------------------------------------------------
@@ -724,6 +776,8 @@ function Team() {
     setOverview(null);
     setOverviewDays(null);
     setLive(null);
+    setLiveDataAt(null);
+    setOverviewAt(null);
     setLiveCheckedAt(null);
     setLiveError(null);
     setInvite(null);
@@ -1022,9 +1076,9 @@ function Team() {
           <p>Across {team.sessions} sessions</p>
         </div>
         <div className="stat-card">
-          <span>Team Focus Score</span>
+          <span>Team Active Share</span>
           <h2>{team.focus_score === null ? "--" : `${team.focus_score}%`}</h2>
-          <p>Active share of tracked time</p>
+          <p>Active share of tracked time (focus session scores are per member below)</p>
         </div>
       </div>
 
@@ -1036,7 +1090,9 @@ function Team() {
           <h3>Members</h3>
           <p>
             "Now" shows what online members are doing, refreshed every few seconds.
-            Open a member for their hourly pattern, apps, window titles and sessions.
+            "Focus" shows a running focus session, or the member's focus score (average of
+            finished sessions, last 30 days). Open a member for their hourly pattern, apps,
+            window titles, sessions and focus sessions.
           </p>
         </div>
         <div className="table-wrapper">
@@ -1049,6 +1105,7 @@ function Team() {
                 <th>Last upload</th>
                 <th>Active time</th>
                 <th>Per day</th>
+                <th>Active share</th>
                 <th>Focus</th>
                 <th>Sessions</th>
                 <th>Top app</th>
@@ -1060,7 +1117,7 @@ function Team() {
             <tbody>
               {members.length === 0 && (
                 <tr>
-                  <td colSpan="12" className="empty-table">
+                  <td colSpan="13" className="empty-table">
                     No members yet. Create an invite below.
                   </td>
                 </tr>
@@ -1088,6 +1145,7 @@ function Team() {
                     <td>{m.summary.observations ? formatDuration(m.summary.active_seconds) : "--"}</td>
                     <td>{m.summary.observations ? `${m.summary.active_hours_per_day} h` : "--"}</td>
                     <td>{m.summary.focus_score === null ? "--" : `${m.summary.focus_score}%`}</td>
+                    <td>{pending ? <span className="muted-text">--</span> : <FocusCell focus={m.focus} receivedAt={m.focusAt} />}</td>
                     <td>{m.summary.sessions}</td>
                     <td>{m.summary.top_application || "--"}</td>
                     <td>

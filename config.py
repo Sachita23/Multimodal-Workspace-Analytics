@@ -246,3 +246,29 @@ TEAM_ANALYSIS_DAYS = 30
 TEAM_CONSENT_VERSION = 1
 
 TEAM_SHARED_FIELDS = list(RAW_COLUMNS)
+
+
+# --------------------------------------------------
+# Focus Sessions (scoring and the headless engine)
+# --------------------------------------------------
+
+# Every focus session starts at this score. Each deviation episode
+# (switching to an application outside the declared focus zone) costs
+# FOCUS_SWITCH_PENALTY points, and every minute spent outside the zone
+# another FOCUS_OFF_TASK_PENALTY_PER_MINUTE (see focus/scoring.py).
+FOCUS_START_SCORE = 100
+
+FOCUS_SWITCH_PENALTY = 5
+
+FOCUS_OFF_TASK_PENALTY_PER_MINUTE = 6
+
+# How often the focus engine (focus/engine.py) checks the frontmost window.
+FOCUS_TICK_SECONDS = 1
+
+# The overall focus score averages the sessions of this many days.
+FOCUS_SCORE_WINDOW_DAYS = 30
+
+# The application a session is started from (the dashboard's browser,
+# the member's terminal) counts as neither focus nor deviation for this
+# long, so there is time to switch to an allowed application.
+FOCUS_START_GRACE_SECONDS = 10

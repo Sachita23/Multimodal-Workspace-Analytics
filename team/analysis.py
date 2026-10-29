@@ -12,6 +12,10 @@ Cross-user ML then works on the pooled session-level features:
 
 Real and simulated (demo) members form separate cohorts for both,
 so demo members never change what is said about real people.
+
+Focus sessions members choose to share (team_sync.py focus) are
+summarised per member: an overall focus score and, while one runs,
+what they are doing in it.
 """
 
 import hashlib
@@ -63,6 +67,24 @@ MAX_OBSERVATION_GAP_SECONDS = getattr(config, "MAX_OBSERVATION_GAP_SECONDS", 15)
 LIVE_WINDOW_SECONDS = 600
 
 TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+# A shared focus session counts as live while its collector reported
+# it running within this many seconds (it uploads every 5 s).
+FOCUS_LIVE_SECONDS = 30
+
+# A running session not heard from for this long was abandoned (the
+# terminal closed, the machine slept or crashed): it is shown and
+# scored as Interrupted, with its last reported numbers. A later
+# upload of the real end (or of the session resuming) still wins.
+FOCUS_ABANDONED_SECONDS = 120
+FOCUS_INTERRUPTED = "Interrupted"
+
+# The overall focus score averages finished sessions started within
+# this many days (config.FOCUS_SCORE_WINDOW_DAYS).
+FOCUS_SCORE_DAYS = getattr(config, "FOCUS_SCORE_WINDOW_DAYS", 30)
+
+# Most focus sessions returned for one member.
+FOCUS_SESSIONS_LIMIT = 100
 
 
 # Sessions shorter than this say little about behaviour and are
@@ -762,6 +784,7 @@ def team_overview(db_file=None, days=ANALYSIS_DAYS):
         simulated={m["id"]: bool(m.get("simulated")) for m in members},
     )
     pooled = team["pooled"]
+    focus = focus_overview(db_file)
 
     rows = []
 
@@ -778,6 +801,7 @@ def team_overview(db_file=None, days=ANALYSIS_DAYS):
             "behavior_mix": mix,
             "dominant_behavior": max(mix, key=mix.get) if mix else None,
             "comparison": compare_with_team(member["id"], pooled),
+            "focus": focus.get(member["id"]) or empty_focus(),
         })
 
     real_rows = [row for row in rows if not row["simulated"]]
@@ -830,6 +854,8 @@ def member_detail(member_id, db_file=None, days=ANALYSIS_DAYS):
         ),
         "behavior_mix": behavior_mix(member_id, pooled),
         "comparison": compare_with_team(member_id, pooled),
+        "focus": focus_overview(db_file, member_id=member_id).get(member_id)
+        or empty_focus(),
         "hourly_activity": [],
         "top_applications": [],
         "top_windows": [],
@@ -922,6 +948,10 @@ def live_signature(db_file=None):
     """
 
     members, newest_id = db.live_members(db_file)
+    focus = focus_overview(db_file)
+
+    for member in members:
+        member["focus"] = focus.get(member["id"]) or empty_focus()
 
     state = [newest_id] + [
         (
@@ -930,6 +960,9 @@ def live_signature(db_file=None):
             member_status(member),
             member["last_seen"],
             bool(member["simulated"]),
+            # Includes the live session (remaining time, current app,
+            # score), so every focus upload changes the tag.
+            sorted_items(member["focus"]),
         )
         for member in members
     ]
@@ -937,6 +970,21 @@ def live_signature(db_file=None):
     tag = hashlib.sha1(repr(state).encode("utf-8")).hexdigest()
 
     return members, tag
+
+
+def sorted_items(value):
+    """
+    A dict (nested dicts and lists too) as nested sorted tuples, for
+    a stable repr.
+    """
+
+    if isinstance(value, dict):
+        return tuple(sorted((k, sorted_items(v)) for k, v in value.items()))
+
+    if isinstance(value, list):
+        return tuple(sorted_items(v) for v in value)
+
+    return value
 
 
 def live_rollup(rows):
@@ -982,12 +1030,19 @@ def team_live(db_file=None, members=None):
     What every member is doing right now. `current` is only
     filled in for members who are online; the 10-minute rollup
     is measured back from each member's own newest observation.
+    `focus` is the member's focus score and live focus session.
     """
 
     if members is None:
         members, _ = db.live_members(db_file)
 
     latest = db.latest_observations(db_file, LIVE_WINDOW_SECONDS)
+
+    # live_signature() already attached each member's focus block.
+    focus = (
+        None if all("focus" in member for member in members)
+        else focus_overview(db_file)
+    )
     rows = []
 
     for member in members:
@@ -1002,10 +1057,275 @@ def team_live(db_file=None, members=None):
             "last_seen": member["last_seen"],
             "current": dict(newest) if newest and status == "online" else None,
             "last_10_min": live_rollup(window),
+            "focus": member["focus"] if focus is None
+            else focus.get(member["id"]) or empty_focus(),
         })
 
     return {
         "generated_at": _utc_now_iso(),
         "online_window_seconds": TEAM_ONLINE_SECONDS,
         "members": rows,
+    }
+
+
+# --------------------------------------------------
+# Focus sessions (shared by members, SQL only)
+# --------------------------------------------------
+
+def _parse_utc(value):
+    try:
+        parsed = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+
+    return parsed
+
+
+def focus_is_live(session, now=None):
+    """
+    Whether a stored focus session is running right now: reported as
+    running, and received within FOCUS_LIVE_SECONDS. The server's own
+    receive time is used, not the member's clock, so a member in
+    another time zone (or with a wrong clock) still shows live.
+    """
+
+    if session.get("status") != db.FOCUS_RUNNING:
+        return False
+
+    received = _parse_utc(session.get("received_at"))
+
+    if received is None:
+        return False
+
+    now = now or datetime.now(timezone.utc)
+    age = (now - received).total_seconds()
+
+    return -FOCUS_LIVE_SECONDS <= age <= FOCUS_LIVE_SECONDS
+
+
+def focus_since(now=None, days=None):
+    """
+    Oldest started_at ("YYYY-MM-DDTHH:MM:SS", member local time)
+    counted in the overall focus score.
+    """
+
+    days = FOCUS_SCORE_DAYS if days is None else days
+    now = now or _local_now()
+
+    return (now - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def focus_is_abandoned(session, now=None):
+    """
+    Whether a stored session still reports running but its collector
+    has not been heard from for FOCUS_ABANDONED_SECONDS (server time).
+    """
+
+    if session.get("status") != db.FOCUS_RUNNING:
+        return False
+
+    received = _parse_utc(session.get("received_at"))
+    now = now or datetime.now(timezone.utc)
+
+    return received is None or (
+        (now - received).total_seconds() > FOCUS_ABANDONED_SECONDS
+    )
+
+
+def focus_status(session, now=None):
+    """
+    The status to show and score a stored session by: Interrupted
+    for an abandoned running one, else as reported.
+    """
+
+    if focus_is_abandoned(session, now):
+        return FOCUS_INTERRUPTED
+
+    return session.get("status")
+
+
+def focus_summary(sessions, since=None, now=None):
+    """
+    {"sessions", "focus_score", "deviation_count", "window_days"} over
+    the sessions started at or after `since`: focus_score is the mean
+    score (1 decimal) of the finished ones (abandoned ones included,
+    see focus_status), or None.
+    """
+
+    since = since or focus_since()
+    recent = [s for s in sessions if (s.get("started_at") or "") >= since]
+    finished = [
+        s for s in recent if focus_status(s, now) != db.FOCUS_RUNNING
+    ]
+
+    return _summary_block(
+        len(recent),
+        len(finished),
+        sum(s["score"] for s in finished),
+        sum(s.get("deviations") or 0 for s in recent),
+    )
+
+
+def _summary_block(sessions, finished, score_sum, deviations):
+    return {
+        "sessions": int(sessions),
+        "focus_score": round(score_sum / finished, 1) if finished else None,
+        "deviation_count": int(deviations),
+        "window_days": FOCUS_SCORE_DAYS,
+    }
+
+
+def _stats_summary(stats):
+    if not stats:
+        return _summary_block(0, 0, 0, 0)
+
+    return _summary_block(
+        stats["sessions"], stats["finished"], stats["score_sum"],
+        stats["deviations"],
+    )
+
+
+def focus_live(session):
+    """
+    The live block of a running session for the Team page.
+    """
+
+    return {
+        "running": True,
+        "session_id": session["session_id"],
+        "title": session["title"],
+        "goal": session["goal"],
+        "started_at": session["started_at"],
+        "planned_minutes": session["planned_minutes"],
+        "allowed_apps": list(session["allowed_apps"]),
+        "remaining_s": session["remaining_s"],
+        "current_app": session["current_app"],
+        "allowed": session["current_allowed"],
+        "score": session["score"],
+        "deviations": session["deviations"],
+        "updated_at": session["updated_at"],
+    }
+
+
+def empty_focus():
+    return {"score": None, "sessions": 0, "live": None}
+
+
+def member_focus(sessions, now=None, since=None):
+    """
+    One member's "focus" block: overall score, number of sessions in
+    the score window, and the live session (or None).
+    """
+
+    summary = focus_summary(sessions, since, now)
+    live = next((s for s in sessions if focus_is_live(s, now)), None)
+
+    return {
+        "score": summary["focus_score"],
+        "sessions": summary["sessions"],
+        "live": focus_live(live) if live else None,
+    }
+
+
+def _live_sessions(db_file, now, member_id=None):
+    """
+    {member_id: newest live session}, from the running rows received
+    within FOCUS_LIVE_SECONDS (an indexed query, not a scan).
+    """
+
+    window = timedelta(seconds=FOCUS_LIVE_SECONDS)
+    live = {}
+
+    for session in db.running_focus_sessions(
+        now - window, now + window, member_id=member_id, db_file=db_file,
+    ):
+        if focus_is_live(session, now):
+            live.setdefault(session["member_id"], session)
+
+    return live
+
+
+def focus_overview(db_file=None, now=None, member_id=None):
+    """
+    {member_id: focus block} for every member with focus sessions (or
+    just `member_id`). Runs on every /live poll, so the score window is
+    aggregated in SQL rather than loaded row by row.
+    """
+
+    now = now or datetime.now(timezone.utc)
+    stats = db.focus_stats(
+        focus_since(),
+        now - timedelta(seconds=FOCUS_ABANDONED_SECONDS),
+        member_id=member_id,
+        db_file=db_file,
+    )
+    live = _live_sessions(db_file, now, member_id)
+
+    overview = {}
+
+    for mid in set(stats) | set(live):
+        summary = _stats_summary(stats.get(mid))
+        overview[mid] = {
+            "score": summary["focus_score"],
+            "sessions": summary["sessions"],
+            "live": focus_live(live[mid]) if mid in live else None,
+        }
+
+    return overview
+
+
+def public_focus_session(session, now=None):
+    """
+    A stored focus session as the member focus endpoint returns it.
+    """
+
+    return {
+        "session_id": session["session_id"],
+        "title": session["title"],
+        "goal": session["goal"],
+        "planned_minutes": session["planned_minutes"],
+        "allowed_apps": list(session["allowed_apps"]),
+        "started_at": session["started_at"],
+        "ended_at": session["ended_at"],
+        "status": focus_status(session, now),
+        "live": focus_is_live(session, now),
+        "deviations": session["deviations"],
+        "deviation_seconds": round(float(session["deviation_seconds"]), 1),
+        "allowed_seconds": round(float(session["allowed_seconds"]), 1),
+        "score": session["score"],
+        "current_app": session["current_app"],
+        "current_allowed": session["current_allowed"],
+        "remaining_s": session["remaining_s"],
+        "updated_at": session["updated_at"],
+        "received_at": session["received_at"],
+    }
+
+
+def member_focus_detail(member_id, db_file=None, now=None):
+    """
+    GET /api/team/members/<id>/focus: the member's newest focus
+    sessions plus their summary, or None for an unknown member.
+    """
+
+    if db.get_member(member_id, db_file) is None:
+        return None
+
+    now = now or datetime.now(timezone.utc)
+    sessions = db.focus_sessions(member_id, db_file, limit=FOCUS_SESSIONS_LIMIT)
+    stats = db.focus_stats(
+        focus_since(),
+        now - timedelta(seconds=FOCUS_ABANDONED_SECONDS),
+        member_id=member_id,
+        db_file=db_file,
+    )
+    live = _live_sessions(db_file, now, member_id).get(member_id)
+
+    return {
+        "generated_at": _utc_now_iso(),
+        "sessions": [public_focus_session(session, now) for session in sessions],
+        "summary": _stats_summary(stats.get(member_id)),
+        "live": focus_live(live) if live else None,
     }

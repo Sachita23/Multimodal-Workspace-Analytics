@@ -148,8 +148,35 @@
 .new-samples-button:hover { background: #efedff; }
 
 
+
+/* Focus sessions: members table "Focus" column and the member page card.
+   Score and on/off-task badges (focus-score-badge, focus-task-badge) are
+   shared with the Focus page and styled in index.css only. */
+
+.team-focus-cell { display: flex; max-width: 240px; flex-direction: column; gap: 4px; }
+.team-focus-text { color: #34405b; font-family: "DM Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size: 10px; font-weight: 600; white-space: nowrap; }
+.team-focus-score { display: inline-flex; align-items: center; gap: 6px; }
+.team-focus-score strong { color: #34405b; }
+
+.member-focus-live { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 20px; margin: 16px 20px; padding: 16px 18px; border: 1px solid #d7d1ff; border-left: 4px solid #6252df; border-radius: 10px; background: #f7f6ff; }
+.member-focus-live.is-off-task { border-color: #f0b3c2; border-left-color: #db4f70; background: #fff8fa; }
+.member-focus-live h3 { color: #26314b; font-size: 15px; letter-spacing: -.02em; }
+.member-focus-now { flex-wrap: wrap; margin-top: 10px; color: #5b6880; font-size: 11px; }
+.member-focus-now strong { color: #26314b; }
+.member-focus-apps { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin-top: 10px; color: #8490a6; font-size: 10px; }
+.member-focus-app { padding: 2px 7px; border: 1px solid #e3e7ef; border-radius: 999px; background: white; color: #526078; font-size: 10px; font-weight: 600; }
+.member-focus-figures { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; align-content: start; }
+.member-focus-figures > div { padding: 10px; border-radius: 9px; background: white; }
+.member-focus-figures dt { color: #8490a6; font-size: 9px; font-weight: 700; text-transform: uppercase; }
+.member-focus-figures dd { margin-top: 6px; color: #2b3650; font-family: "DM Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size: 18px; font-weight: 500; }
+.member-focus-figures dd + dd { margin-top: 4px; font-family: inherit; font-size: inherit; }
+.member-focus-empty { padding: 14px 20px 18px; }
+.member-focus-empty code { padding: 1px 5px; border-radius: 4px; background: #f1f3f6; color: #34405b; font-family: "DM Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size: 10px; }
+
+
 @media (max-width: 1080px) {
   .right-now-card { grid-template-columns: 1fr; }
+  .member-focus-live { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 620px) {
@@ -159,4 +186,6 @@
   .team-actions { justify-content: flex-start; }
   .team-actions .range-group { width: 100%; }
   .right-now-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .member-focus-live { margin: 12px; padding: 14px; }
+  .member-focus-figures { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }

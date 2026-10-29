@@ -1,10 +1,8 @@
-import { useEffect, useState } from "react";
-import { Activity, AlertTriangle, AppWindow, Bell, Brain, LayoutDashboard, Menu, Search, Settings, Sparkles, Target, TrendingUp, Users, X } from "lucide-react";
+import { useState } from "react";
+import { Activity, AppWindow, Brain, LayoutDashboard, Menu, Search, Settings, Sparkles, Target, TrendingUp, Users, X } from "lucide-react";
 import { NavLink, useLocation, useNavigate } from "react-router-dom";
 
-import { useAnalytics } from "../context/AnalyticsProvider";
-import { useAnomaliesSeen, usePreferences } from "../hooks/usePreferences";
-import { rangeShowing, unseenEpisodes } from "../utils/anomalyAlerts";
+import { usePreferences } from "../hooks/usePreferences";
 import { initials } from "../utils/format";
 
 const navigation = [
@@ -13,7 +11,6 @@ const navigation = [
   { to: "/applications", label: "Applications", icon: AppWindow },
   { to: "/behavior", label: "Behavior", icon: Brain },
   { to: "/trends", label: "Trends", icon: TrendingUp },
-  { to: "/anomalies", label: "Anomalies", icon: AlertTriangle },
   { to: "/insights", label: "Insights", icon: Sparkles },
   { to: "/focus", label: "Focus", icon: Target },
   { to: "/team", label: "Team", icon: Users },
@@ -53,54 +50,6 @@ function SearchBox({ onSearch }) {
 }
 
 
-function AnomalyBell() {
-  const navigate = useNavigate();
-  const { data, anomalyEpisodes, range, setRange } = useAnalytics();
-  const [preferences] = usePreferences();
-  const [seen, markSeen, seeded] = useAnomaliesSeen();
-  const loaded = data !== null;
-
-  // First visit in this browser: what happened before is not "new".
-  useEffect(() => {
-    if (loaded && !seeded) {
-      markSeen(anomalyEpisodes.map((episode) => episode.id));
-    }
-  }, [loaded, seeded, anomalyEpisodes, markSeen]);
-
-  const unseen = preferences.anomalyAlerts && seeded
-    ? unseenEpisodes(anomalyEpisodes, seen)
-    : [];
-  const newCount = unseen.length;
-
-  // Open the Anomalies page on a range that lists every new episode (a
-  // range the user picked is only ever widened).
-  function openAnomalies() {
-    const target = rangeShowing(unseen, range);
-
-    if (target !== range) setRange(target);
-
-    navigate("/anomalies");
-  }
-
-  const label = newCount > 0
-    ? `${newCount} new unusual ${newCount === 1 ? "episode" : "episodes"}`
-    : "No new unusual activity";
-
-  return (
-    <button
-      type="button"
-      className="nav-icon-button"
-      aria-label={label}
-      title={label}
-      onClick={openAnomalies}
-    >
-      <Bell size={17} aria-hidden="true" />
-      {newCount > 0 && <span className="nav-badge-dot" />}
-    </button>
-  );
-}
-
-
 function Navbar() {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [preferences] = usePreferences();
@@ -121,7 +70,6 @@ function Navbar() {
 
         <div className="top-nav-actions">
           <SearchBox />
-          <AnomalyBell />
           <NavLink to="/settings" className="user-menu" aria-label={`${name} – open settings`}><span className="user-avatar" aria-hidden="true">{initials(name)}</span><span className="user-name">{name}</span></NavLink>
           <button className="menu-toggle" aria-label="Toggle navigation" aria-expanded={isMenuOpen} onClick={() => setIsMenuOpen((open) => !open)}>{isMenuOpen ? <X size={20} /> : <Menu size={20} />}</button>
         </div>

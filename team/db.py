@@ -2,8 +2,10 @@
 SQLite storage for team (multi-user) collection.
 
 Tables:
-    members       one row per invited / joined person
-    observations  raw collector rows pushed by each member
+    members         one row per invited / joined person
+    observations    raw collector rows pushed by each member
+    focus_sessions  focus sessions a member chose to share (one row
+                    per session, updated while it runs)
 
 Tokens and invite codes are stored only as SHA-256 hashes.
 """
@@ -57,7 +59,50 @@ CREATE TABLE IF NOT EXISTS observations (
 
 CREATE INDEX IF NOT EXISTS idx_observations_member_time
     ON observations (member_id, timestamp);
+
+CREATE TABLE IF NOT EXISTS focus_sessions (
+    member_id         INTEGER NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+    session_id        TEXT    NOT NULL,
+    title             TEXT    NOT NULL,
+    goal              TEXT    NOT NULL,
+    planned_minutes   INTEGER NOT NULL,
+    allowed_apps      TEXT    NOT NULL,
+    started_at        TEXT    NOT NULL,
+    ended_at          TEXT,
+    status            TEXT    NOT NULL,
+    deviations        INTEGER NOT NULL,
+    deviation_seconds REAL    NOT NULL,
+    allowed_seconds   REAL    NOT NULL,
+    score             INTEGER NOT NULL,
+    current_app       TEXT,
+    current_allowed   INTEGER,
+    remaining_s       INTEGER,
+    updated_at        TEXT    NOT NULL,
+    received_at       TEXT    NOT NULL,
+    PRIMARY KEY (member_id, session_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_focus_sessions_member_start
+    ON focus_sessions (member_id, started_at);
+
+-- The Team page's score window (every /live poll) and its live
+-- sessions, without scanning every member's whole history.
+CREATE INDEX IF NOT EXISTS idx_focus_sessions_start
+    ON focus_sessions (started_at);
+
+CREATE INDEX IF NOT EXISTS idx_focus_sessions_status_received
+    ON focus_sessions (status, received_at);
 """
+
+# The status a member's collector reports while a focus session runs.
+FOCUS_RUNNING = "running"
+
+FOCUS_COLUMNS = (
+    "session_id", "title", "goal", "planned_minutes", "allowed_apps",
+    "started_at", "ended_at", "status", "deviations", "deviation_seconds",
+    "allowed_seconds", "score", "current_app", "current_allowed",
+    "remaining_s", "updated_at",
+)
 
 # Columns added after the first release. init_db() adds any that
 # an older database is missing.
@@ -68,8 +113,12 @@ MIGRATIONS = {
 }
 
 # PRAGMA user_version after init_db(). Version 1 flags the demo
-# members written before the `simulated` column existed.
-SCHEMA_VERSION = 1
+# members written before the `simulated` column existed; version 2
+# adds focus_sessions (created by SCHEMA, which only adds missing
+# tables, so an older database keeps all of its rows); version 3 adds
+# the focus_sessions indexes on started_at and (status, received_at),
+# also created by SCHEMA.
+SCHEMA_VERSION = 3
 
 # Names given to simulated members before they were flagged: the
 # team.simulate profiles (an earlier README ran it against the real
@@ -161,6 +210,9 @@ def init_db(db_file=None):
 
         if version < 1:
             _flag_legacy_simulated(conn)
+
+        # Versions 2 and 3 (focus_sessions and its indexes) need no
+        # data changes: SCHEMA above already created them.
 
         if version < SCHEMA_VERSION:
             conn.execute(f"PRAGMA user_version = {int(SCHEMA_VERSION)}")
@@ -387,12 +439,17 @@ def member_cohorts(db_file=None):
 
 def delete_member(member_id, db_file=None):
     """
-    Remove a member and every observation they shared.
+    Remove a member and every observation and focus session they
+    shared.
     """
 
     with connect(db_file) as conn:
         conn.execute(
             "DELETE FROM observations WHERE member_id = ?",
+            (member_id,),
+        )
+        conn.execute(
+            "DELETE FROM focus_sessions WHERE member_id = ?",
             (member_id,),
         )
         cursor = conn.execute(
@@ -669,3 +726,203 @@ def latest_observations(db_file=None, window_seconds=600):
             result[member_id] = (latest, [dict(row) for row in rows])
 
     return result
+
+
+# --------------------------------------------------
+# Focus sessions
+# --------------------------------------------------
+
+def upsert_focus_session(member_id, session, db_file=None):
+    """
+    Store a validated focus session (see team.api.validate_focus_session),
+    replacing the row for the same member and session_id: a member's
+    collector re-sends the whole row every few seconds while the
+    session runs and once more when it ends. Also marks the member as
+    seen, like an observation upload.
+
+    Updates only move forward: a finished row is never replaced (a
+    late "running" upload from a retry must not bring it back to life),
+    and a running row only by a finished one or a running one at least
+    as new. Returns True when the row was stored or changed.
+    """
+
+    now = _iso(utc_now())
+    values = dict(session)
+    values["allowed_apps"] = json.dumps(list(session["allowed_apps"]))
+    current_allowed = session.get("current_allowed")
+    values["current_allowed"] = (
+        None if current_allowed is None else int(bool(current_allowed))
+    )
+
+    columns = ("member_id", *FOCUS_COLUMNS, "received_at")
+    placeholders = ", ".join("?" for _ in columns)
+    updates = ", ".join(
+        f"{column} = excluded.{column}"
+        for column in (*FOCUS_COLUMNS[1:], "received_at")
+    )
+
+    with connect(db_file) as conn:
+        cursor = conn.execute(
+            f"INSERT INTO focus_sessions ({', '.join(columns)}) "
+            f"VALUES ({placeholders}) "
+            f"ON CONFLICT (member_id, session_id) DO UPDATE SET {updates} "
+            "WHERE focus_sessions.status = ? AND ("
+            "    excluded.status != ? "
+            "    OR excluded.updated_at >= focus_sessions.updated_at"
+            ")",
+            (
+                member_id,
+                *(values.get(column) for column in FOCUS_COLUMNS),
+                now,
+                FOCUS_RUNNING,
+                FOCUS_RUNNING,
+            ),
+        )
+        conn.execute(
+            "UPDATE members SET last_seen = ? WHERE id = ?",
+            (now, member_id),
+        )
+
+    return cursor.rowcount > 0
+
+
+def focus_session_exists(member_id, session_id, db_file=None):
+    with connect(db_file) as conn:
+        row = conn.execute(
+            "SELECT 1 FROM focus_sessions WHERE member_id = ? AND session_id = ?",
+            (member_id, session_id),
+        ).fetchone()
+
+    return row is not None
+
+
+def focus_sessions_received_since(member_id, since, db_file=None):
+    """
+    How many of a member's focus sessions were last received at or
+    after `since` (a UTC datetime): the new-session rate limit.
+    """
+
+    with connect(db_file) as conn:
+        return conn.execute(
+            "SELECT COUNT(*) FROM focus_sessions "
+            "WHERE member_id = ? AND received_at >= ?",
+            (member_id, _iso(since)),
+        ).fetchone()[0]
+
+
+def _focus_row(row):
+    session = dict(row)
+
+    try:
+        apps = json.loads(session.get("allowed_apps") or "[]")
+    except ValueError:
+        apps = []
+
+    session["allowed_apps"] = apps if isinstance(apps, list) else []
+
+    if session.get("current_allowed") is not None:
+        session["current_allowed"] = bool(session["current_allowed"])
+
+    return session
+
+
+def focus_sessions(member_id=None, db_file=None, limit=None, since=None):
+    """
+    Stored focus sessions, newest start first: one member's, or
+    everyone's when member_id is None; `since` ("YYYY-MM-DDTHH:MM:SS")
+    keeps those started at or after it. Each includes member_id and
+    received_at (server UTC time of the last upload).
+    """
+
+    sql = "SELECT * FROM focus_sessions"
+    where = []
+    params = []
+
+    if member_id is not None:
+        where.append("member_id = ?")
+        params.append(member_id)
+
+    if since is not None:
+        where.append("started_at >= ?")
+        params.append(since)
+
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+
+    sql += " ORDER BY started_at DESC, received_at DESC"
+
+    if limit is not None:
+        sql += " LIMIT ?"
+        params.append(int(limit))
+
+    with connect(db_file) as conn:
+        rows = conn.execute(sql, params).fetchall()
+
+    return [_focus_row(row) for row in rows]
+
+
+
+def focus_stats(since, finished_before, member_id=None, db_file=None):
+    """
+    {member_id: {"sessions", "deviations", "finished", "score_sum"}}
+    over the focus sessions started at or after `since`, computed in
+    SQL. A session counts as finished when its status is not running,
+    or when it was last received before `finished_before` (a UTC
+    datetime): its collector stopped without sending the end.
+    """
+
+    sql = (
+        "SELECT member_id, COUNT(*) AS sessions, "
+        "COALESCE(SUM(deviations), 0) AS deviations, "
+        "SUM(CASE WHEN status != ? OR received_at < ? THEN 1 ELSE 0 END) "
+        "    AS finished, "
+        "SUM(CASE WHEN status != ? OR received_at < ? THEN score ELSE 0 END) "
+        "    AS score_sum "
+        "FROM focus_sessions WHERE started_at >= ?"
+    )
+    cutoff = _iso(finished_before)
+    params = [FOCUS_RUNNING, cutoff, FOCUS_RUNNING, cutoff, since]
+
+    if member_id is not None:
+        sql += " AND member_id = ?"
+        params.append(member_id)
+
+    sql += " GROUP BY member_id"
+
+    with connect(db_file) as conn:
+        rows = conn.execute(sql, params).fetchall()
+
+    return {
+        row["member_id"]: {
+            "sessions": row["sessions"],
+            "deviations": row["deviations"],
+            "finished": row["finished"] or 0,
+            "score_sum": row["score_sum"] or 0,
+        }
+        for row in rows
+    }
+
+
+def running_focus_sessions(received_from, received_to, member_id=None,
+                           db_file=None):
+    """
+    Running focus sessions last received between the two UTC
+    datetimes (inclusive), newest start first.
+    """
+
+    sql = (
+        "SELECT * FROM focus_sessions "
+        "WHERE status = ? AND received_at >= ? AND received_at <= ?"
+    )
+    params = [FOCUS_RUNNING, _iso(received_from), _iso(received_to)]
+
+    if member_id is not None:
+        sql += " AND member_id = ?"
+        params.append(member_id)
+
+    sql += " ORDER BY started_at DESC, received_at DESC"
+
+    with connect(db_file) as conn:
+        rows = conn.execute(sql, params).fetchall()
+
+    return [_focus_row(row) for row in rows]

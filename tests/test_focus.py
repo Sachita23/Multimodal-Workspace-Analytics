@@ -48,6 +48,16 @@ SESSION_KEYS = {
     "top_deviation_app",
 }
 
+# Focus sessions with scoring only ADD fields to these responses: the old
+# keys above must stay, and these new ones must be present too.
+LIVE_KEYS_ADDED = {
+    "session_id", "source", "started_at", "planned_s", "allowed_apps",
+    "current_window", "state", "score", "deviations", "deviation_seconds",
+    "last_deviation", "recent_deviations", "pid",
+}
+SUMMARY_KEYS_ADDED = {"focus_score"}
+SESSION_KEYS_ADDED = {"score"}
+
 
 # ---------------------------------------------------------
 # Helpers
@@ -574,7 +584,7 @@ def test_heartbeat_round_trip_and_staleness(data_dir):
     assert manager.write_heartbeat("Visual Studio Code", True, "Within focus zone")
 
     live = analytics.live_status(data_dir)
-    assert set(live) == LIVE_KEYS
+    assert LIVE_KEYS | LIVE_KEYS_ADDED <= set(live)
     assert live["running"] is True and live["stale"] is False
     assert live["title"] == "Write report"
     assert live["current_app"] == "Visual Studio Code"
@@ -605,11 +615,11 @@ def focus_client(data_dir):
 
 def test_focus_api_without_any_data(focus_client):
     live = focus_client.get("/api/focus/live").get_json()
-    assert set(live) == LIVE_KEYS
+    assert LIVE_KEYS | LIVE_KEYS_ADDED <= set(live)
     assert live["stale"] is True and live["running"] is False
 
     summary = focus_client.get("/api/focus/summary").get_json()
-    assert set(summary) == SUMMARY_KEYS
+    assert SUMMARY_KEYS | SUMMARY_KEYS_ADDED <= set(summary)
     assert summary["sessions"] == 0 and summary["adherence_pct"] is None
 
     assert focus_client.get("/api/focus/sessions").get_json() == {"sessions": []}
@@ -640,12 +650,12 @@ def test_focus_api_endpoints(focus_client, data_dir):
     live = response.get_json()
     assert response.status_code == 200
     assert response.headers["Cache-Control"] == "no-store"
-    assert set(live) == LIVE_KEYS
+    assert LIVE_KEYS | LIVE_KEYS_ADDED <= set(live)
     assert live["running"] is True and live["stale"] is False
     assert live["title"] == "Live session" and live["remaining_s"] == 1200
 
     summary = focus_client.get("/api/focus/summary").get_json()
-    assert set(summary) == SUMMARY_KEYS
+    assert SUMMARY_KEYS | SUMMARY_KEYS_ADDED <= set(summary)
     assert summary["sessions"] == 2
     assert summary["completed"] == 1
     assert summary["adherence_pct"] == pytest.approx(75.0)
@@ -659,7 +669,7 @@ def test_focus_api_endpoints(focus_client, data_dir):
 
     sessions = focus_client.get("/api/focus/sessions").get_json()["sessions"]
     assert [session["id"] for session in sessions] == ["running", "old"]
-    assert all(set(session) == SESSION_KEYS for session in sessions)
+    assert all(SESSION_KEYS | SESSION_KEYS_ADDED <= set(session) for session in sessions)
     assert sessions[0]["status"] == "In progress" and sessions[0]["end"] is None
     assert sessions[1] == {
         "id": "old",
@@ -675,6 +685,8 @@ def test_focus_api_endpoints(focus_client, data_dir):
         "switches": 1,
         "longest_focus_s": 300,
         "top_deviation_app": "Slack",
+        # 100 - 5 (one deviation) - 6 * 100 s / 60 off task.
+        "score": 85,
     }
 
 

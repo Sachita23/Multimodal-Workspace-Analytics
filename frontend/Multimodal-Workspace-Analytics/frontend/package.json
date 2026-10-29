@@ -10,7 +10,7 @@
     "dev": "vite",
     "build": "vite build",
     "lint": "oxlint",
-    "test": "node --test src/data/analytics.test.js src/data/focus.test.js src/data/focusPage.test.js src/context/analyticsPoller.test.js src/context/csvParser.test.js src/utils/http.test.js src/utils/liveStatus.test.js src/utils/anomalyAlerts.test.js src/utils/polling.test.js src/data/team.test.js src/pages/team.css.test.js",
+    "test": "node --test src/data/analytics.test.js src/data/focus.test.js src/data/focusPage.test.js src/data/focusSession.test.js src/data/teamFocus.test.js src/context/analyticsPoller.test.js src/context/csvParser.test.js src/utils/http.test.js src/utils/liveStatus.test.js src/utils/anomalyAlerts.test.js src/utils/polling.test.js src/data/team.test.js src/pages/team.css.test.js",
     "preview": "vite preview"
   },
   "dependencies": {

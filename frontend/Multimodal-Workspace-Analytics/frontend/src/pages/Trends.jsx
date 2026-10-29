@@ -15,7 +15,7 @@ import { AnalyticsGate } from "../components/PageState";
 import { BRAND_COLOR, CHART_COLORS, NEUTRAL_COLOR, formatMinutes } from "../utils/format";
 
 function TrendsContent({ data }) {
-  const { hourlyActivity, resourceByHour, metrics, peakHour, mostIdleHour, hourlyMode, hourlyDays } = data;
+  const { hourlyActivity, resourceByHour, metrics, peakHour, hourlyMode, hourlyDays } = data;
   const timeline = hourlyMode === "timeline";
   const unitNote = timeline ? "in the last 24 hours" : `avg per day over ${hourlyDays} ${hourlyDays === 1 ? "day" : "days"}`;
   const minutesTooltip = (value, name) => [formatMinutes(value), name];
@@ -24,9 +24,8 @@ function TrendsContent({ data }) {
   return (
     <>
       <div className="page-header"><div><h1>Trends</h1><p>Explore how workspace activity and device resources change over time.</p></div></div>
-      <div className="stats-grid">
+      <div className="stats-grid stats-grid-3">
         <div className="stat-card"><span>Peak Activity</span><h2>{peakHour ? peakHour.label : "--"}</h2><p>{peakHour ? `${formatMinutes(peakHour.active)} active (${timeline ? "that hour" : "avg per day"})` : "Needs a full hour of data"}</p></div>
-        <div className="stat-card"><span>Most Idle</span><h2>{mostIdleHour && mostIdleHour.idle > 0 ? mostIdleHour.label : "--"}</h2><p>{mostIdleHour && mostIdleHour.idle > 0 ? `${formatMinutes(mostIdleHour.idle)} idle (${timeline ? "that hour" : "avg per day"})` : "No idle time in complete hours"}</p></div>
         <div className="stat-card"><span>Avg CPU</span><h2>{metrics.avgCPU}%</h2><p>{data.rangeLabel}</p></div>
         <div className="stat-card"><span>Avg Memory</span><h2>{metrics.avgMemory}%</h2><p>{data.rangeLabel}</p></div>
       </div>
