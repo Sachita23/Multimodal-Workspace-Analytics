@@ -4,7 +4,9 @@ Headless focus sessions show the Focus Assistant's deviation popup
 again once back in the zone or idle, closed when the session ends.
 """
 
+import subprocess
 from datetime import timedelta
+from pathlib import Path
 
 import pytest
 
@@ -123,16 +125,73 @@ def test_ending_the_session_closes_the_popup(rig):
     assert overlay.calls[-1] == ("close",)
 
 
-def test_default_engine_uses_the_popup_only_with_tk_and_popups_on(tmp_path, monkeypatch):
+def test_default_overlay_prefers_the_native_macos_popup(tmp_path, monkeypatch):
     monkeypatch.setenv(overlay_module.POPUP_ENV, "1")
-    monkeypatch.setattr(overlay_module, "tk_available", lambda: False)
-    assert overlay_module.default_overlay() is None
 
+    # Native helper available (macOS with clang): it is used, even without Tk.
+    monkeypatch.setattr(overlay_module, "native_helper", lambda: tmp_path / "focus_popup-x")
+    monkeypatch.setattr(overlay_module, "tk_available", lambda: False)
+    controller = overlay_module.default_overlay()
+    assert controller.command == [str(tmp_path / "focus_popup-x")]
+
+    # No native helper: the Tk helper, if Tk is installed.
+    monkeypatch.setattr(overlay_module, "native_helper", lambda: None)
+    assert overlay_module.default_overlay() is None
     monkeypatch.setattr(overlay_module, "tk_available", lambda: True)
-    assert isinstance(overlay_module.default_overlay(), overlay_module.OverlayController)
+    controller = overlay_module.default_overlay()
+    assert controller.command[-2:] == ["-m", "focus.overlay"]
 
     monkeypatch.setenv(overlay_module.POPUP_ENV, "0")
     assert overlay_module.default_overlay() is None
+
+
+def test_native_helper_is_built_once_per_source_version(tmp_path, monkeypatch):
+    source = tmp_path / "macos_popup.m"
+    source.write_text("int main(void) { return 0; }")
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        Path(argv[argv.index("-o") + 1]).write_text("binary")
+        Path(argv[argv.index("-o") + 1]).chmod(0o755)
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(overlay_module.shutil, "which", lambda name: "/usr/bin/clang")
+    monkeypatch.setattr(overlay_module.subprocess, "run", fake_run)
+
+    first = overlay_module.native_helper(source, tmp_path / "bin", platform="darwin")
+    second = overlay_module.native_helper(source, tmp_path / "bin", platform="darwin")
+    assert first == second and first.exists() and len(calls) == 1
+
+    # A changed source builds a new binary.
+    source.write_text("int main(void) { return 1; }")
+    third = overlay_module.native_helper(source, tmp_path / "bin", platform="darwin")
+    assert third != first and len(calls) == 2
+
+
+def test_native_helper_needs_macos_and_a_working_compiler(tmp_path, monkeypatch):
+    source = tmp_path / "macos_popup.m"
+    source.write_text("broken")
+
+    assert overlay_module.native_helper(source, tmp_path / "bin", platform="win32") is None
+
+    monkeypatch.setattr(overlay_module.shutil, "which", lambda name: None)
+    assert overlay_module.native_helper(source, tmp_path / "bin", platform="darwin") is None
+
+    monkeypatch.setattr(overlay_module.shutil, "which", lambda name: "/usr/bin/clang")
+    monkeypatch.setattr(overlay_module.subprocess, "run",
+                        lambda argv, **kwargs: subprocess.CompletedProcess(argv, 1))
+    assert overlay_module.native_helper(source, tmp_path / "bin", platform="darwin") is None
+    assert list((tmp_path / "bin").glob("*.tmp")) == []
+
+
+def test_native_popup_source_keeps_the_original_look():
+    source = overlay_module.MACOS_SOURCE.read_text()
+
+    for text in ("FOCUS DEVIATION", "Allow for this session", "Snooze 5 min",
+                 "This reminder stays until you return to your focus zone.",
+                 "NSWindowStyleMaskNonactivatingPanel", "CanJoinAllSpaces", "FullScreenAuxiliary"):
+        assert text in source
 
 
 def test_an_engine_with_the_popup_turns_off_the_simple_alert_window(tmp_path, monkeypatch):
