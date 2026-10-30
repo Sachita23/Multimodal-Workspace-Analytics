@@ -846,6 +846,8 @@ def test_notify_is_non_blocking_and_never_raises(monkeypatch):
     monkeypatch.setattr(notify, "command", lambda title, message: (["helper", title, message], {}))
     monkeypatch.setattr(notify.subprocess, "Popen", fake_popen)
     monkeypatch.delenv(notify.DISABLE_ENV, raising=False)
+    # The popup window is covered in tests/test_focus_popup.py.
+    monkeypatch.setenv(notify.POPUP_ENV, "0")
 
     assert notify.notify("T", "M") is True
     argv, options = started[0]

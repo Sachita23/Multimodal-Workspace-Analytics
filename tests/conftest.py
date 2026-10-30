@@ -30,6 +30,9 @@ for _name, _path in {
 
 os.environ.pop("WORKSPACE_TEAM_ADMIN_KEY", None)
 
+# Never open a real deviation popup window on the developer's screen.
+os.environ["WORKSPACE_FOCUS_POPUP"] = "0"
+
 from config import TEAM_CONSENT_VERSION, TEAM_SHARED_FIELDS  # noqa: E402
 from team import db  # noqa: E402
 from team.api import init_team  # noqa: E402

@@ -115,6 +115,8 @@ NEUTRAL_APPLICATIONS = {
     "notification center",
     "notificationcenter",
     "screensaverengine",
+    # The deviation popup itself (focus/notify.py, `display alert`).
+    "osascript",
 }
 
 # Windows Alt+Tab switcher and the desktop (both owned by explorer.exe).
