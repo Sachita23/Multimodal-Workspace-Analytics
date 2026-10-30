@@ -1200,8 +1200,11 @@ def create_focus_engine(data_dir, notifier):
     """
 
     from focus.engine import FocusEngine
+    from focus.overlay import default_overlay
 
-    return FocusEngine(data_dir=data_dir, notifier=notifier, source="member")
+    # The Focus Assistant's deviation popup, when Tk is installed.
+    return FocusEngine(data_dir=data_dir, notifier=notifier, source="member",
+                       overlay=default_overlay())
 
 
 def desktop_notify(title, message):

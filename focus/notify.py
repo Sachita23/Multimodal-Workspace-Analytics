@@ -66,6 +66,15 @@ WINDOWS_POPUP_SCRIPT = "; ".join([
 _popup_lock = threading.Lock()
 _popup_process = None
 
+# False while a focus engine shows the Focus Assistant's own popup
+# (focus/overlay.py); then only the banner is sent from here.
+_fallback_popup = True
+
+
+def use_fallback_popup(enabled):
+    global _fallback_popup
+    _fallback_popup = bool(enabled)
+
 MAX_TITLE_LENGTH = 120
 MAX_MESSAGE_LENGTH = 400
 
@@ -306,7 +315,8 @@ def notify(title, message):
         process = subprocess.Popen(argv, **options)
         threading.Thread(target=_reap, args=(process,), daemon=True).start()
 
-        popup(title, message)
+        if _fallback_popup:
+            popup(title, message)
         return True
 
     except Exception:

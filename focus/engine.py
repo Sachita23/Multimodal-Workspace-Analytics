@@ -43,6 +43,7 @@ if str(PROJECT_ROOT) not in sys.path:
 import config  # noqa: E402
 from focus import analytics, scoring  # noqa: E402
 from focus import notify as desktop_notify  # noqa: E402
+from focus import overlay as deviation_overlay  # noqa: E402
 from focus.focus_manager import (  # noqa: E402
     STATE_ALLOWED,
     STATE_DEVIATION,
@@ -79,6 +80,9 @@ STATUS_DASHBOARD = "Viewing the Focus page"
 # or pressing Stop never costs points. Another tab in that browser hides
 # the page, so it is a deviation again within this time.
 DASHBOARD_VIEW_SECONDS = 3
+
+# "Snooze 5 min" on the deviation popup.
+SNOOZE_SECONDS = 5 * 60
 STATUS_PAUSED = "Paused (idle)"
 
 DEVIATION_TITLE = "Focus deviation"
@@ -209,6 +213,9 @@ class _EngineManager(FocusManager):
         self.dashboard_app = None
         self.dashboard_until = None
         self.source = source
+        # Process ids of our own windows besides this process (the
+        # deviation popup helper); set by the engine.
+        self.own_pids = lambda: set()
         super().__init__(data_dir, clock=clock)
 
     def start_session(self, title, goal, duration_minutes, allowed_apps):
@@ -285,6 +292,14 @@ class _EngineManager(FocusManager):
         )
 
     def classify(self, application, window_title="", pid=None, idle_seconds=0.0):
+        try:
+            if pid is not None and int(pid) in self.own_pids():
+                # The deviation popup: looking at or clicking it is neither
+                # focus nor a deviation.
+                return STATE_SELF
+        except (TypeError, ValueError):
+            pass
+
         state = super().classify(application, window_title, pid, idle_seconds)
 
         if state == STATE_DEVIATION and self.viewing_dashboard(application):
@@ -326,7 +341,7 @@ class FocusEngine:
     """
 
     def __init__(self, data_dir=None, sampler=None, idle_reader=None, notifier=None,
-                 source="dashboard", clock=None, tick_seconds=None):
+                 source="dashboard", clock=None, tick_seconds=None, overlay=None):
         if source not in SOURCES:
             raise ValueError(f"source must be one of {', '.join(SOURCES)}.")
 
@@ -336,6 +351,21 @@ class FocusEngine:
 
         self._sampler = sampler or _default_sampler
         self._idle_reader = idle_reader or _default_idle_reader
+        # The Focus Assistant's deviation popup (focus/overlay.py). The
+        # default notifier gets it automatically when Tk is installed;
+        # callers with their own notifier pass one in (team_sync does).
+        if overlay is None and notifier is None:
+            overlay = deviation_overlay.default_overlay()
+
+        self._overlay = overlay
+        self._snooze_until = None
+
+        if overlay is not None:
+            if getattr(overlay, "on_action", None) is None:
+                overlay.on_action = self._on_overlay_action
+            # The popup replaces focus/notify.py's simple alert window.
+            desktop_notify.use_fallback_popup(False)
+
         self._notifier = desktop_notify.notify if notifier is None else notifier
         self._clock = clock or datetime.now
 
@@ -442,6 +472,11 @@ class FocusEngine:
 
             self._manager = manager
             self._instance_lock = lock
+            self._snooze_until = None
+
+            if self._overlay is not None:
+                manager.own_pids = self._overlay.pids
+
             self._live = None
             self._view = {}
             self._last_deviation = None
@@ -606,6 +641,7 @@ class FocusEngine:
             view = (application, window_title, False, status)
 
         current_app, current_window, allowed, status = view
+        self._update_overlay(state, application, window_title, now)
 
         if manager.last_write_error:
             status = manager.last_write_error
@@ -617,6 +653,47 @@ class FocusEngine:
             "state": state if state in analytics.LIVE_STATES else None,
             "status": status,
         }
+
+    def _update_overlay(self, state, application, window_title, now):
+        """
+        Like the Focus Assistant: the popup shows while off task (unless
+        snoozed) and hides once back in the zone or idle. Neutral, unknown
+        and our own windows leave it as it is.
+        """
+
+        overlay = self._overlay
+
+        if overlay is None:
+            return
+
+        try:
+            if state == STATE_DEVIATION:
+                if self._snooze_until is not None and now < self._snooze_until:
+                    overlay.hide()
+                else:
+                    manager = self._manager
+                    overlay.show(application, window_title, manager.goal, manager.allowed_apps)
+            elif state in (STATE_ALLOWED, STATE_IDLE):
+                overlay.hide()
+        except Exception as error:  # the popup must never stop monitoring
+            self._log_error(error)
+
+    def _on_overlay_action(self, action, application):
+        """
+        A button on the popup: "Allow for this session" or "Snooze 5 min".
+        """
+
+        try:
+            if action == "allow" and application:
+                self.allow(application)
+            elif action == "snooze":
+                with self._lock:
+                    self._snooze_until = self._now() + timedelta(seconds=SNOOZE_SECONDS)
+
+                if self._overlay is not None:
+                    self._overlay.hide()
+        except Exception as error:
+            self._log_error(error)
 
     def _on_new_deviation(self, application, window_title, now):
         allowed = ", ".join(self._manager.allowed_apps)
@@ -712,6 +789,9 @@ class FocusEngine:
         session_id = manager.session_id
         manager.stop_session(status, ended_at=ended_at)
         now = self._now()
+
+        if self._overlay is not None:
+            self._overlay.close()
 
         analytics.write_live({
             "running": False,
