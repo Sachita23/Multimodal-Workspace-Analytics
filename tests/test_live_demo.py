@@ -4,7 +4,6 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta
-from pathlib import Path
 
 import pytest
 
@@ -277,7 +276,7 @@ def test_flush_keeps_rows_while_unreachable_and_drops_removed_members(monkeypatc
     assert "no longer streaming" in capsys.readouterr().out
 
 
-def test_blank_state_env_falls_back_to_default(monkeypatch):
+def test_blank_state_env_falls_back_to_default(monkeypatch, tmp_path):
     default = TEAM_DATA_DIR / "live_demo.json"
 
     for blank in ("", "   "):
@@ -290,5 +289,8 @@ def test_blank_state_env_falls_back_to_default(monkeypatch):
     monkeypatch.setenv("WORKSPACE_TEAM_DEMO_STATE", "data/demo/state.json")
     assert live_demo._state_file() == PROJECT_ROOT / "data" / "demo" / "state.json"
 
-    monkeypatch.setenv("WORKSPACE_TEAM_DEMO_STATE", "/private/tmp/state.json")
-    assert live_demo._state_file() == Path("/private/tmp/state.json")
+    # An absolute path is used as is (tmp_path is absolute on every OS;
+    # "/private/tmp" has no drive letter, so Windows treats it as relative).
+    absolute = tmp_path / "state.json"
+    monkeypatch.setenv("WORKSPACE_TEAM_DEMO_STATE", str(absolute))
+    assert live_demo._state_file() == absolute

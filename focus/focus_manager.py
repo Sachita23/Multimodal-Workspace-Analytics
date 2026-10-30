@@ -239,11 +239,19 @@ class InstanceLock:
 
     def holder_pid(self):
         """The pid written by the process holding the lock, if readable."""
+        # Read exactly the pid bytes, unbuffered: a buffered read fetches
+        # a whole block, which on Windows covers the locked _LOCK_BYTE and
+        # fails while the lock is held.
         try:
-            with open(self.path, "rb") as file:
-                return int(file.read(_PID_WIDTH).strip())
+            fd = os.open(self.path, os.O_RDONLY | getattr(os, "O_BINARY", 0))
+        except OSError:
+            return None
+        try:
+            return int(os.read(fd, _PID_WIDTH).strip())
         except (OSError, ValueError):
             return None
+        finally:
+            os.close(fd)
 
     def __enter__(self):
         return self
