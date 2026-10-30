@@ -186,7 +186,7 @@ def test_native_helper_needs_macos_and_a_working_compiler(tmp_path, monkeypatch)
 
 
 def test_native_popup_source_keeps_the_original_look():
-    source = overlay_module.MACOS_SOURCE.read_text()
+    source = overlay_module.MACOS_SOURCE.read_text(encoding="utf-8")
 
     for text in ("FOCUS DEVIATION", "Allow for this session", "Snooze 5 min",
                  "This reminder stays until you return to your focus zone.",
