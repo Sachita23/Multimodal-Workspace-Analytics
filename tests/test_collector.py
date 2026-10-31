@@ -532,8 +532,11 @@ def test_sampling_cadence_holds_while_uploads_are_slow(joined, monkeypatch):
     expected = interval * (len(samples) - 1)
 
     # Sleeping a fixed interval after each slow upload would take
-    # (0.2 + 0.12) per sample, i.e. about 3.5 s instead of 2.2 s.
-    assert elapsed == pytest.approx(expected, abs=0.25)
+    # (0.2 + 0.12) per sample, i.e. about 3.5 s instead of 2.2 s. The
+    # bound sits halfway between the two, so a slow CI machine's
+    # scheduling jitter does not fail the test but that bug still does.
+    drifting = (interval + 0.12) * (len(samples) - 1)
+    assert expected * 0.9 <= elapsed < (expected + drifting) / 2
     assert len(uploads) >= len(samples) - 1
 
 
