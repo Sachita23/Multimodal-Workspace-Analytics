@@ -1,0 +1,23 @@
+# Tool configuration only. The project is run from a checkout
+# (python start_project.py), not installed as a package; dependencies
+# live in requirements*.txt.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# pytest's defaults plus the folders that must never be collected:
+# the local repo/ snapshot, the virtual environment, the dashboard
+# and personal data.
+norecursedirs = [
+    ".*",
+    "*.egg",
+    "_darcs",
+    "build",
+    "CVS",
+    "dist",
+    "node_modules",
+    "venv",
+    "{arch}",
+    "repo",
+    "frontend",
+    "data",
+]

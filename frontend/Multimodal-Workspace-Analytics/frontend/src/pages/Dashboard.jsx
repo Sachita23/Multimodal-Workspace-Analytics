@@ -1,5 +1,3 @@
-import { useEffect, useState } from "react";
-
 import {
   ResponsiveContainer,
   LineChart,
@@ -17,110 +15,24 @@ import {
 } from "recharts";
 
 import DashboardLayout from "../layouts/DashboardLayout";
-import { loadAnalyticsData } from "../data/analytics";
+import { AnalyticsGate, CollectingState } from "../components/PageState";
+import { useAnalytics } from "../context/AnalyticsProvider";
+import { MIN_ROWS_FOR_INSIGHTS } from "../data/analytics";
+import { BRAND_COLOR, CHART_COLORS, NEUTRAL_COLOR, behaviorColor, formatDateTime, formatDuration, formatMinutes, truncate, isBehaviorLabel } from "../utils/format";
 
 
-function formatMinutes(seconds) {
-
-  const minutes = Math.round(seconds / 60);
-
-  if (minutes < 60) {
-    return `${minutes} min`;
+function hourlySubtitle(data) {
+  if (data.hourlyMode === "timeline") {
+    return "Active and idle minutes in each of the last 24 hours";
   }
 
-  const hours = Math.floor(minutes / 60);
-  const remainingMinutes = minutes % 60;
-
-  return `${hours}h ${remainingMinutes}m`;
+  return `Average minutes per hour of day (avg per day, ${data.hourlyDays} ${data.hourlyDays === 1 ? "day" : "days"} with data)`;
 }
 
 
-function formatDuration(seconds) {
+function DashboardContent({ data }) {
 
-  const minutes = Math.round(seconds / 60);
-
-  if (minutes < 60) {
-    return `${minutes} min`;
-  }
-
-  const hours = Math.floor(minutes / 60);
-  const remainingMinutes = minutes % 60;
-
-  return `${hours}h ${remainingMinutes}m`;
-}
-
-
-function Dashboard() {
-
-  const [analytics, setAnalytics] = useState(null);
-
-  const [loading, setLoading] = useState(true);
-
-  const [error, setError] = useState(null);
-
-
-  useEffect(() => {
-
-    loadAnalyticsData()
-
-      .then((data) => {
-
-        setAnalytics(data);
-
-        setLoading(false);
-
-      })
-
-      .catch((err) => {
-
-        console.error(err);
-
-        setError(err.message);
-
-        setLoading(false);
-
-      });
-
-  }, []);
-
-
-  if (loading) {
-
-    return (
-
-      <DashboardLayout>
-
-        <div className="loading-state">
-          Loading workspace analytics...
-        </div>
-
-      </DashboardLayout>
-
-    );
-
-  }
-
-
-  if (error) {
-
-    return (
-
-      <DashboardLayout>
-
-        <div className="error-state">
-
-          <h2>Unable to load dataset</h2>
-
-          <p>{error}</p>
-
-        </div>
-
-      </DashboardLayout>
-
-    );
-
-  }
-
+  const { dataAsOf } = useAnalytics();
 
   const {
     metrics,
@@ -128,7 +40,7 @@ function Dashboard() {
     behaviorDistribution,
     applicationUsage,
     resourceByHour
-  } = analytics;
+  } = data;
 
 
   /*
@@ -140,22 +52,20 @@ function Dashboard() {
     applicationUsage
       .slice(0, 8)
       .map((item) => ({
-        application:
-          item.application.length > 18
-            ? item.application.substring(0, 18) + "..."
-            : item.application,
-
-        duration:
-          Math.round(item.duration / 60)
+        application: truncate(item.application, 18),
+        duration: Math.round((item.duration / 60) * 10) / 10
       }));
 
   const topApplication = applicationUsage[0];
-  const dominantBehavior = behaviorDistribution[0];
+  const dominantBehavior = behaviorDistribution.find((item) => isBehaviorLabel(item.behavior));
+  const behaviorTotal = behaviorDistribution.reduce((total, item) => total + item.seconds, 0);
+  const trackedApplicationSeconds = applicationUsage.reduce((total, app) => total + app.duration, 0);
+  const enoughData = metrics.totalRecords >= MIN_ROWS_FOR_INSIGHTS;
 
 
   return (
 
-    <DashboardLayout>
+    <>
 
       {/* =========================
           HEADER
@@ -165,7 +75,7 @@ function Dashboard() {
 
         <div>
 
-          <span className="page-kicker">Workspace overview</span>
+          <span className="page-kicker">Workspace overview · {data.rangeLabel}</span>
 
           <h1>Workspace Overview</h1>
 
@@ -173,11 +83,6 @@ function Dashboard() {
             Monitor activity, attention patterns, and resource usage across your workspace.
           </p>
 
-        </div>
-
-        <div className="dashboard-actions">
-          <button className="range-selector">Last 24 hours ▾</button>
-          <button className="date-selector">Dataset overview</button>
         </div>
 
       </div>
@@ -189,64 +94,30 @@ function Dashboard() {
 
       <div className="stats-grid">
 
-
         <div className="stat-card">
-
           <span>Active Time</span>
-
-          <h2>
-            {formatMinutes(metrics.totalActiveSeconds)}
-          </h2>
-
-          <p>
-            Total recorded active time
-          </p>
-
+          <h2>{formatDuration(metrics.totalActiveSeconds)}</h2>
+          <p>Recorded active time</p>
         </div>
 
-
         <div className="stat-card">
-
           <span>Focus Score</span>
-
-          <h2>
-            {metrics.focusScore}%
-          </h2>
-
-          <p>
-            Derived from active vs idle time
-          </p>
-
+          <h2>{metrics.focusScore}%</h2>
+          <p>Share of tracked time that was active</p>
         </div>
 
-
         <div className="stat-card">
-
           <span>Sessions</span>
-
-          <h2>
-            {metrics.totalSessions}
-          </h2>
-
-          <p>
-            Unique workspace sessions
-          </p>
-
+          <h2>{metrics.totalSessions}</h2>
+          <p>Work sessions, split at breaks of 5+ min</p>
         </div>
 
-
         <div className="stat-card">
-
           <span>Anomalies</span>
-
-          <h2>
-            {metrics.anomalyCount}
-          </h2>
-
+          <h2>{metrics.anomalyCount}</h2>
           <p>
-            Detected anomalous records
+            Unusual episodes ({metrics.anomalousRecords.toLocaleString()} samples)
           </p>
-
         </div>
 
       </div>
@@ -258,64 +129,28 @@ function Dashboard() {
 
       <div className="stats-grid secondary-stats">
 
-
         <div className="stat-card">
-
           <span>Idle Time</span>
-
-          <h2>
-            {formatMinutes(metrics.totalIdleSeconds)}
-          </h2>
-
-          <p>
-            Total recorded idle time
-          </p>
-
+          <h2>{formatDuration(metrics.totalIdleSeconds)}</h2>
+          <p>Recorded idle time</p>
         </div>
 
-
         <div className="stat-card">
-
           <span>App Switches</span>
-
-          <h2>
-            {metrics.applicationSwitches}
-          </h2>
-
-          <p>
-            Application context switches
-          </p>
-
+          <h2>{metrics.applicationSwitches.toLocaleString()}</h2>
+          <p>Application context switches</p>
         </div>
 
-
         <div className="stat-card">
-
           <span>Window Switches</span>
-
-          <h2>
-            {metrics.windowSwitches}
-          </h2>
-
-          <p>
-            Window context switches
-          </p>
-
+          <h2>{metrics.windowSwitches.toLocaleString()}</h2>
+          <p>Window context switches</p>
         </div>
 
-
         <div className="stat-card">
-
           <span>Avg CPU</span>
-
-          <h2>
-            {metrics.avgCPU}%
-          </h2>
-
-          <p>
-            Average CPU utilization
-          </p>
-
+          <h2>{metrics.avgCPU}%</h2>
+          <p>Average CPU utilization</p>
         </div>
 
       </div>
@@ -333,57 +168,29 @@ function Dashboard() {
         <div className="chart-card large">
 
           <div className="chart-header">
-
             <div>
-
-              <h3>
-                Activity Timeline
-              </h3>
-
-              <p>
-                Active and idle time by hour
-              </p>
-
+              <h3>Activity Timeline</h3>
+              <p>{hourlySubtitle(data)}</p>
             </div>
-
           </div>
-
 
           <div className="chart-container">
 
-            <ResponsiveContainer
-              width="100%"
-              height="100%"
-            >
+            <ResponsiveContainer width="100%" height="100%">
 
               <LineChart
                 data={hourlyActivity}
-                margin={{
-                  top: 10,
-                  right: 20,
-                  left: 0,
-                  bottom: 5
-                }}
+                margin={{ top: 10, right: 20, left: 0, bottom: 5 }}
               >
 
-                <CartesianGrid
-                  strokeDasharray="3 3"
-                />
+                <CartesianGrid strokeDasharray="3 3" />
 
-                <XAxis
-                  dataKey="hour"
-                  tickFormatter={(hour) => `${hour}:00`}
-                />
+                <XAxis dataKey="label" minTickGap={16} />
 
-                <YAxis />
+                <YAxis unit=" min" width={56} />
 
                 <Tooltip
-                  formatter={(value) => [
-                    `${value} min`
-                  ]}
-                  labelFormatter={(hour) =>
-                    `${hour}:00`
-                  }
+                  formatter={(value, name) => [formatMinutes(value), name]}
                 />
 
                 <Legend />
@@ -391,19 +198,21 @@ function Dashboard() {
                 <Line
                   type="monotone"
                   dataKey="active"
-                  name="Active Time"
-                  stroke="#2563eb"
-                  strokeWidth={3}
+                  name="Active time"
+                  stroke={CHART_COLORS[0]}
+                  strokeWidth={2}
                   dot={false}
+                  isAnimationActive={false}
                 />
 
                 <Line
                   type="monotone"
                   dataKey="idle"
-                  name="Idle Time"
-                  stroke="#9ca3af"
+                  name="Idle time"
+                  stroke={NEUTRAL_COLOR}
                   strokeWidth={2}
                   dot={false}
+                  isAnimationActive={false}
                 />
 
               </LineChart>
@@ -420,66 +229,45 @@ function Dashboard() {
         <div className="chart-card">
 
           <div className="chart-header">
-
             <div>
-
-              <h3>
-                Behavior Distribution
-              </h3>
-
-              <p>
-                Workspace behavior classification
-              </p>
-
+              <h3>Behavior Distribution</h3>
+              <p>Share of tracked time by behavior pattern</p>
             </div>
-
           </div>
-
 
           <div className="chart-container pie-container">
 
-            <ResponsiveContainer
-              width="100%"
-              height="100%"
-            >
+            <ResponsiveContainer width="100%" height="100%">
 
               <PieChart>
 
                 <Pie
                   data={behaviorDistribution}
-                  dataKey="count"
+                  dataKey="seconds"
                   nameKey="behavior"
                   cx="50%"
                   cy="45%"
-                  outerRadius={90}
+                  outerRadius={85}
                   innerRadius={50}
-                  paddingAngle={3}
-                  label={({ behavior, percent }) =>
-                    `${behavior} ${(percent * 100).toFixed(0)}%`
-                  }
+                  paddingAngle={2}
+                  label={false}
+                  isAnimationActive={false}
                 >
 
-                  {behaviorDistribution.map(
-                    (entry, index) => (
-
-                      <Cell
-                        key={`cell-${index}`}
-                        fill={[
-                          "#2563eb",
-                          "#10b981",
-                          "#f59e0b",
-                          "#8b5cf6",
-                          "#ef4444",
-                          "#06b6d4"
-                        ][index % 6]}
-                      />
-
-                    )
-                  )}
+                  {behaviorDistribution.map((entry) => (
+                    <Cell key={entry.behavior} fill={behaviorColor(entry.behavior)} />
+                  ))}
 
                 </Pie>
 
-                <Tooltip />
+                <Tooltip
+                  formatter={(value, name) => [
+                    `${formatDuration(value)} (${behaviorTotal ? ((value / behaviorTotal) * 100).toFixed(0) : 0}%)`,
+                    name
+                  ]}
+                />
+
+                <Legend verticalAlign="bottom" />
 
               </PieChart>
 
@@ -504,67 +292,36 @@ function Dashboard() {
         <div className="chart-card large">
 
           <div className="chart-header">
-
             <div>
-
-              <h3>
-                Application Usage
-              </h3>
-
-              <p>
-                Top applications by active duration
-              </p>
-
+              <h3>Application Usage</h3>
+              <p>Top applications by active time</p>
             </div>
-
           </div>
-
 
           <div className="chart-container">
 
-            <ResponsiveContainer
-              width="100%"
-              height="100%"
-            >
+            <ResponsiveContainer width="100%" height="100%">
 
               <BarChart
                 data={topApplications}
                 layout="vertical"
-                margin={{
-                  top: 5,
-                  right: 20,
-                  left: 30,
-                  bottom: 5
-                }}
+                margin={{ top: 5, right: 20, left: 10, bottom: 5 }}
               >
 
-                <CartesianGrid
-                  strokeDasharray="3 3"
-                />
+                <CartesianGrid strokeDasharray="3 3" />
 
-                <XAxis
-                  type="number"
-                  unit=" min"
-                />
+                <XAxis type="number" unit=" min" />
 
-                <YAxis
-                  type="category"
-                  dataKey="application"
-                  width={130}
-                />
+                <YAxis type="category" dataKey="application" width={130} />
 
-                <Tooltip
-                  formatter={(value) => [
-                    `${value} min`,
-                    "Active Time"
-                  ]}
-                />
+                <Tooltip formatter={(value) => [formatMinutes(value), "Active time"]} />
 
                 <Bar
                   dataKey="duration"
-                  name="Active Time"
-                  fill="#2563eb"
-                  radius={[0, 5, 5, 0]}
+                  name="Active time"
+                  fill={BRAND_COLOR}
+                  radius={[0, 4, 4, 0]}
+                  isAnimationActive={false}
                 />
 
               </BarChart>
@@ -581,63 +338,28 @@ function Dashboard() {
         <div className="chart-card">
 
           <div className="chart-header">
-
             <div>
-
-              <h3>
-                Resource Monitoring
-              </h3>
-
-              <p>
-                CPU and memory utilization
-              </p>
-
+              <h3>Resource Monitoring</h3>
+              <p>Average CPU and memory utilization by hour</p>
             </div>
-
           </div>
-
 
           <div className="chart-container">
 
-            <ResponsiveContainer
-              width="100%"
-              height="100%"
-            >
+            <ResponsiveContainer width="100%" height="100%">
 
               <LineChart
                 data={resourceByHour}
-                margin={{
-                  top: 10,
-                  right: 10,
-                  left: 0,
-                  bottom: 5
-                }}
+                margin={{ top: 10, right: 10, left: 0, bottom: 5 }}
               >
 
-                <CartesianGrid
-                  strokeDasharray="3 3"
-                />
+                <CartesianGrid strokeDasharray="3 3" />
 
-                <XAxis
-                  dataKey="hour"
-                  tickFormatter={(hour) =>
-                    `${hour}:00`
-                  }
-                />
+                <XAxis dataKey="label" minTickGap={16} />
 
-                <YAxis
-                  domain={[0, 100]}
-                  unit="%"
-                />
+                <YAxis domain={[0, 100]} unit="%" />
 
-                <Tooltip
-                  formatter={(value) => [
-                    `${value}%`
-                  ]}
-                  labelFormatter={(hour) =>
-                    `${hour}:00`
-                  }
-                />
+                <Tooltip formatter={(value, name) => [`${value}%`, name]} />
 
                 <Legend />
 
@@ -645,18 +367,20 @@ function Dashboard() {
                   type="monotone"
                   dataKey="cpu"
                   name="CPU"
-                  stroke="#2563eb"
+                  stroke={CHART_COLORS[0]}
                   strokeWidth={2}
                   dot={false}
+                  isAnimationActive={false}
                 />
 
                 <Line
                   type="monotone"
                   dataKey="memory"
                   name="Memory"
-                  stroke="#10b981"
+                  stroke={CHART_COLORS[1]}
                   strokeWidth={2}
                   dot={false}
+                  isAnimationActive={false}
                 />
 
               </LineChart>
@@ -678,69 +402,89 @@ function Dashboard() {
       <div className="data-summary-card">
 
         <div>
-
-          <h3>
-            Application Activity Summary
-          </h3>
-
+          <h3>Application Activity Summary</h3>
           <p>
             {applicationUsage.length} applications detected
             across {metrics.totalSessions} sessions.
           </p>
-
         </div>
 
         <div className="summary-value">
-
-          {formatDuration(
-            applicationUsage.reduce(
-              (sum, app) =>
-                sum + app.duration,
-              0
-            )
-          )}
-
-          <span>
-            tracked application time
-          </span>
-
+          {formatDuration(trackedApplicationSeconds)}
+          <span>tracked application time</span>
         </div>
 
       </div>
 
+
+      {/* =========================
+          INSIGHTS
+      ========================= */}
+
       <section className="dashboard-insights">
+
         <div className="section-heading">
           <div>
-            <span className="section-kicker">AI Insights</span>
+            <span className="section-kicker">Insights</span>
             <h2>What your workspace activity is saying</h2>
           </div>
-          <span className="insight-status">Updated from current dataset</span>
+          <span className="insight-status">
+            Data as of {formatDateTime(dataAsOf)}
+          </span>
         </div>
 
-        <div className="dashboard-insight-grid">
-          <article className="dashboard-insight-card">
-            <span>Productivity observation</span>
-            <h3>{metrics.focusScore}% focus score</h3>
-            <p>{metrics.focusScore >= 60 ? "Your active time is leading idle time, indicating a productive work rhythm." : "Idle time is significant; short focus blocks may help improve consistency."}</p>
-          </article>
-          <article className="dashboard-insight-card">
-            <span>Behavioral pattern</span>
-            <h3>{dominantBehavior?.behavior || "No pattern detected"}</h3>
-            <p>{dominantBehavior ? `${dominantBehavior.count.toLocaleString()} activity records match this dominant workspace behavior.` : "Behavior classification will appear when data is available."}</p>
-          </article>
-          <article className="dashboard-insight-card">
-            <span>Detected anomalies</span>
-            <h3>{metrics.anomalyCount} flagged events</h3>
-            <p>{metrics.anomalyCount ? "Review unusual records to understand interruptions or unexpected resource use." : "No unusual activity was detected in this dataset."}</p>
-          </article>
-          <article className="dashboard-insight-card recommendation-card">
-            <span>Recommendation</span>
-            <h3>Protect your primary tool time</h3>
-            <p>{topApplication ? `${topApplication.application} is your most-used application. Reserve uninterrupted blocks for focused work there.` : "Continue tracking application activity to unlock recommendations."}</p>
-          </article>
-        </div>
+        {enoughData ? (
+
+          <div className="dashboard-insight-grid">
+            <article className="dashboard-insight-card">
+              <span>Productivity observation</span>
+              <h3>{metrics.focusScore}% focus score</h3>
+              <p>{metrics.focusScore >= 60 ? "Your active time is leading idle time, indicating a productive work rhythm." : "Idle time is significant; short focus blocks may help improve consistency."}</p>
+            </article>
+            <article className="dashboard-insight-card">
+              <span>Behavioral pattern</span>
+              <h3>{dominantBehavior?.behavior || "No pattern detected"}</h3>
+              <p>{dominantBehavior ? `${formatDuration(dominantBehavior.seconds)} of tracked time matches this dominant workspace behavior.` : "Behavior classification will appear when data is available."}</p>
+            </article>
+            <article className="dashboard-insight-card">
+              <span>Detected anomalies</span>
+              <h3>{metrics.anomalyCount} unusual {metrics.anomalyCount === 1 ? "episode" : "episodes"}</h3>
+              <p>{metrics.anomalyCount ? "Review unusual episodes to understand interruptions or unexpected resource use." : "No unusual activity was detected in this range."}</p>
+            </article>
+            <article className="dashboard-insight-card recommendation-card">
+              <span>Recommendation</span>
+              <h3>Protect your primary tool time</h3>
+              <p>{topApplication ? `${topApplication.application} is your most-used application. Reserve uninterrupted blocks for focused work there.` : "Continue tracking application activity to unlock recommendations."}</p>
+            </article>
+          </div>
+
+        ) : (
+
+          <CollectingState records={metrics.totalRecords} />
+
+        )}
+
       </section>
 
+    </>
+
+  );
+
+}
+
+
+function Dashboard() {
+
+  return (
+
+    <DashboardLayout>
+
+      <AnalyticsGate
+        loadingMessage="Loading workspace analytics..."
+        errorTitle="Unable to load dataset"
+      >
+        {(data) => <DashboardContent data={data} />}
+      </AnalyticsGate>
 
     </DashboardLayout>
 

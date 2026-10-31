@@ -1,11 +1,5 @@
-import { useEffect, useState } from "react";
 import {
   ResponsiveContainer,
-  BarChart,
-  Bar,
-  XAxis,
-  YAxis,
-  CartesianGrid,
   Tooltip,
   Legend,
   PieChart,
@@ -14,103 +8,18 @@ import {
 } from "recharts";
 
 import DashboardLayout from "../layouts/DashboardLayout";
-import { loadAnalyticsData } from "../data/analytics";
+import { AnalyticsGate, CollectingState } from "../components/PageState";
+import { MIN_ROWS_FOR_INSIGHTS } from "../data/analytics";
+import { behaviorColor, formatDuration, isBehaviorLabel } from "../utils/format";
 
-function formatDuration(seconds) {
-  if (!seconds || seconds < 0) return "0m";
 
-  const hours = Math.floor(seconds / 3600);
-  const minutes = Math.floor((seconds % 3600) / 60);
+function BehaviorContent({ data }) {
+  const { behaviorAnalytics, behaviorDistribution, metrics } = data;
 
-  if (hours > 0) {
-    return `${hours}h ${minutes}m`;
-  }
-
-  return `${minutes}m`;
-}
-
-function Behavior() {
-  const [data, setData] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
-
-  useEffect(() => {
-    loadAnalyticsData()
-      .then((result) => {
-        setData(result);
-        setLoading(false);
-      })
-      .catch((err) => {
-        console.error(err);
-        setError("Failed to load behavior analytics.");
-        setLoading(false);
-      });
-  }, []);
-
-  if (loading) {
-    return (
-      <DashboardLayout>
-        <div className="loading">Loading behavior analytics...</div>
-      </DashboardLayout>
-    );
-  }
-
-  if (error) {
-    return (
-      <DashboardLayout>
-        <div className="error">{error}</div>
-      </DashboardLayout>
-    );
-  }
-
-  const {
-    behaviorAnalytics = [],
-    behaviorDistribution = [],
-    metrics = {},
-    sessionAnalytics = [],
-  } = data;
-
-  /*
-   * Convert idle ratio into a clean percentage value.
-   *
-   * Example:
-   * 0.25 -> 25
-   * 0.63 -> 63
-   *
-   * This makes the Recharts bar chart easier to display.
-   */
-  const idleRatioData = behaviorAnalytics
-    .map((item) => {
-      const ratio = Number(item.avgIdleRatio);
-
-      return {
-        behavior: item.behavior || "Unknown",
-        idleRatio: Number.isFinite(ratio)
-          ? ratio <= 1
-            ? ratio * 100
-            : ratio
-          : 0,
-      };
-    })
-    .filter((item) => item.behavior);
-
-  const avgSwitchFrequency =
-    sessionAnalytics.length > 0
-      ? sessionAnalytics.reduce(
-          (sum, session) =>
-            sum + (Number(session.switchFrequency) || 0),
-          0
-        ) / sessionAnalytics.length
-      : 0;
-
-  const clusterCount = new Set(
-    sessionAnalytics
-      .map((session) => session.cluster)
-      .filter((cluster) => cluster !== undefined && cluster !== null)
-  ).size;
+  const behaviorTotal = behaviorDistribution.reduce((total, item) => total + item.seconds, 0);
 
   return (
-    <DashboardLayout>
+    <>
       <div className="page-header">
         <div>
           <h1>Behavior Analysis</h1>
@@ -123,33 +32,33 @@ function Behavior() {
       {/* SUMMARY CARDS */}
       <div className="stats-grid">
         <div className="stat-card">
-          <div className="stat-label">Behavior Types</div>
-          <div className="stat-value">{behaviorAnalytics.length}</div>
-          <div className="stat-sub">Detected patterns</div>
+          <span>Behavior Types</span>
+          <h2>{behaviorAnalytics.filter((item) => isBehaviorLabel(item.behavior)).length}</h2>
+          <p>Detected patterns</p>
         </div>
 
         <div className="stat-card">
-          <div className="stat-label">Focus Score</div>
-          <div className="stat-value">
-            {Number(metrics.focusScore || 0).toFixed(2)}%
-          </div>
-          <div className="stat-sub">Active vs idle time</div>
+          <span>Focus Score</span>
+          <h2>{metrics.focusScore.toFixed(1)}%</h2>
+          <p>Active share of tracked time</p>
         </div>
 
         <div className="stat-card">
-          <div className="stat-label">Avg Switch Frequency</div>
-          <div className="stat-value">
-            {avgSwitchFrequency.toFixed(2)}
-          </div>
-          <div className="stat-sub">Per session</div>
+          <span>Avg Switch Frequency</span>
+          <h2>{metrics.avgSwitchFrequency.toFixed(2)}</h2>
+          <p>App switches / min, weighted by session length</p>
         </div>
 
         <div className="stat-card">
-          <div className="stat-label">Behavioral Clusters</div>
-          <div className="stat-value">{clusterCount}</div>
-          <div className="stat-sub">Detected clusters</div>
+          <span>Behavioral Clusters</span>
+          <h2>{metrics.clusterCount}</h2>
+          <p>Clusters among labelled sessions</p>
         </div>
       </div>
+
+      {metrics.totalRecords < MIN_ROWS_FOR_INSIGHTS && (
+        <CollectingState records={metrics.totalRecords} />
+      )}
 
       {/* CHARTS */}
       <div className="dashboard-grid">
@@ -159,105 +68,46 @@ function Behavior() {
           <div className="chart-header">
             <div>
               <h3>Behavior Distribution</h3>
-              <p>Distribution of detected workspace behaviors</p>
+              <p>Share of tracked time by behavior pattern</p>
             </div>
           </div>
 
-          <div className="chart-container">
-            {behaviorDistribution.length > 0 ? (
-              <ResponsiveContainer width="100%" height="100%">
-                <PieChart>
-                  <Pie
-                    data={behaviorDistribution}
-                    dataKey="count"
-                    nameKey="behavior"
-                    cx="50%"
-                    cy="50%"
-                    outerRadius={110}
-                    label
-                  >
-                    {behaviorDistribution.map((entry, index) => (
-                      <Cell key={`cell-${index}`} />
-                    ))}
-                  </Pie>
-
-                  <Tooltip />
-                  <Legend />
-                </PieChart>
-              </ResponsiveContainer>
-            ) : (
-              <div className="loading">
-                No behavior distribution data available.
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* IDLE RATIO */}
-        <div className="chart-card">
-          <div className="chart-header">
-            <div>
-              <h3>Idle Ratio by Behavior</h3>
-              <p>Average idle percentage for each behavior type</p>
-            </div>
-          </div>
-
-          <div className="chart-container">
-            {idleRatioData.length > 0 ? (
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart
-                  data={idleRatioData}
-                  margin={{
-                    top: 10,
-                    right: 20,
-                    left: 10,
-                    bottom: 20,
-                  }}
+          <div className="chart-container pie-container">
+            <ResponsiveContainer width="100%" height="100%">
+              <PieChart>
+                <Pie
+                  data={behaviorDistribution}
+                  dataKey="seconds"
+                  nameKey="behavior"
+                  cx="50%"
+                  cy="45%"
+                  outerRadius={90}
+                  innerRadius={48}
+                  paddingAngle={2}
+                  label={false}
+                  isAnimationActive={false}
                 >
-                  <CartesianGrid strokeDasharray="3 3" />
+                  {behaviorDistribution.map((entry) => (
+                    <Cell key={entry.behavior} fill={behaviorColor(entry.behavior)} />
+                  ))}
+                </Pie>
 
-                  <XAxis
-                    dataKey="behavior"
-                    tick={{ fontSize: 12 }}
-                    interval={0}
-                    angle={-20}
-                    textAnchor="end"
-                    height={60}
-                  />
-
-                  <YAxis
-                    domain={[0, 100]}
-                    tickFormatter={(value) => `${value}%`}
-                  />
-
-                  <Tooltip
-                    formatter={(value) => [
-                      `${Number(value).toFixed(2)}%`,
-                      "Idle Ratio",
-                    ]}
-                  />
-
-                  <Legend />
-
-                  <Bar
-                    dataKey="idleRatio"
-                    name="Idle Ratio"
-                    radius={[6, 6, 0, 0]}
-                  />
-                </BarChart>
-              </ResponsiveContainer>
-            ) : (
-              <div className="loading">
-                No idle-ratio data available.
-              </div>
-            )}
+                <Tooltip
+                  formatter={(value, name) => [
+                    `${formatDuration(value)} (${behaviorTotal ? ((value / behaviorTotal) * 100).toFixed(0) : 0}%)`,
+                    name,
+                  ]}
+                />
+                <Legend verticalAlign="bottom" />
+              </PieChart>
+            </ResponsiveContainer>
           </div>
         </div>
       </div>
 
       {/* BEHAVIOR TABLE */}
-      <div className="data-summary-card behavior-table">
-        <div className="chart-header">
+      <div className="session-table-card behavior-table">
+        <div className="table-header">
           <div>
             <h3>Behavior Details</h3>
             <p>Detailed statistics for each detected behavior</p>
@@ -265,62 +115,54 @@ function Behavior() {
         </div>
 
         <div className="table-wrapper">
-          <table className="session-table">
+          <table>
             <thead>
               <tr>
                 <th>Behavior</th>
-                <th>Records</th>
+                <th>Sessions</th>
+                <th>Samples</th>
                 <th>Active Time</th>
                 <th>Idle Time</th>
-                <th>Avg Idle Ratio</th>
+                <th>Idle Ratio</th>
                 <th>App Switches</th>
                 <th>Avg Apps</th>
               </tr>
             </thead>
 
             <tbody>
-              {behaviorAnalytics.map((item, index) => {
-                const ratio = Number(item.avgIdleRatio) || 0;
-
-                const ratioPercent =
-                  ratio <= 1 ? ratio * 100 : ratio;
-
-                return (
-                  <tr key={item.behavior || index}>
-                    <td>
-                      <strong>{item.behavior || "Unknown"}</strong>
-                    </td>
-
-                    <td>
-                      {(Number(item.records) || 0).toLocaleString()}
-                    </td>
-
-                    <td>
-                      {formatDuration(Number(item.active) || 0)}
-                    </td>
-
-                    <td>
-                      {formatDuration(Number(item.idle) || 0)}
-                    </td>
-
-                    <td>
-                      {ratioPercent.toFixed(2)}%
-                    </td>
-
-                    <td>
-                      {(Number(item.switches) || 0).toLocaleString()}
-                    </td>
-
-                    <td>
-                      {Number(item.avgApplications || 0).toFixed(2)}
-                    </td>
-                  </tr>
-                );
-              })}
+              {behaviorAnalytics.map((item) => (
+                <tr key={item.behavior}>
+                  <td>
+                    <span className="swatch" style={{ background: behaviorColor(item.behavior) }} aria-hidden="true" />
+                    <strong>{item.behavior}</strong>
+                  </td>
+                  <td>{item.sessions}</td>
+                  <td>{item.records.toLocaleString()}</td>
+                  <td>{formatDuration(item.active)}</td>
+                  <td>{formatDuration(item.idle)}</td>
+                  <td>{item.avgIdleRatio.toFixed(1)}%</td>
+                  <td>{item.switches.toLocaleString()}</td>
+                  <td>{item.avgApplications.toFixed(1)}</td>
+                </tr>
+              ))}
             </tbody>
           </table>
         </div>
       </div>
+    </>
+  );
+}
+
+
+function Behavior() {
+  return (
+    <DashboardLayout>
+      <AnalyticsGate
+        loadingMessage="Loading behavior analytics..."
+        errorTitle="Unable to load behavior analytics"
+      >
+        {(data) => <BehaviorContent data={data} />}
+      </AnalyticsGate>
     </DashboardLayout>
   );
 }
